@@ -56,12 +56,17 @@ async function main(): Promise<void> {
   // callback — resolved through this indirection rather than a
   // construction-order cycle (cluster -> respServer -> cluster).
   let connectionCount = (): number => 0;
+  // A fatal replication error can fire any time after start(); shutdown is
+  // defined further down, so route through a mutable handle rather than a
+  // forward reference (same indirection as connectionCount above).
+  let onFatalReplication: (err: Error) => void = () => {};
   const cluster = await withTimeout(
     createClusterCoordinator(config, {
       store,
       pubsub,
       connectionCount: () => connectionCount(),
       commandsTotal: getCommandsProcessedTotal,
+      onFatalReplicationError: (err) => onFatalReplication(err),
     }),
     config.clusterStartupTimeoutMs,
     'timed out connecting to Cosmos DB / Service Bus',
@@ -128,6 +133,16 @@ async function main(): Promise<void> {
       clearTimeout(hardExit);
     }
     process.exit(exitCode);
+  };
+
+  // Replication has died unrecoverably (subscription gone / sustained
+  // receive errors): this node can no longer see peers' writes, so exit
+  // non-zero and let the orchestrator restart a clean instance that
+  // re-creates its subscription and re-hydrates. Staying up would serve a
+  // silently-diverging keyspace.
+  onFatalReplication = (err) => {
+    logger.error('backendcache.replication_fatal', { error: err.message });
+    void shutdown('replicationFatal', 1);
   };
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

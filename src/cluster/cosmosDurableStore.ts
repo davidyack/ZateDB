@@ -160,6 +160,27 @@ export class CosmosDurableStore implements DurableStore {
     return results;
   }
 
+  async loadChangedSince(sinceMs: number): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>> {
+    const now = Date.now();
+    const iterator = this.keysContainer.items.query<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>(
+      {
+        query:
+          'SELECT c.key, c.entry, c.updatedAtMs FROM c WHERE c.updatedAtMs > @since AND (NOT IS_DEFINED(c.entry.expiresAtMs) OR IS_NULL(c.entry.expiresAtMs) OR c.entry.expiresAtMs > @now)',
+        parameters: [
+          { name: '@since', value: sinceMs },
+          { name: '@now', value: now },
+        ],
+      },
+      { maxItemCount: 500 },
+    );
+    const results: Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }> = [];
+    while (iterator.hasMoreResults()) {
+      const { resources } = await iterator.fetchNext();
+      for (const r of resources) results.push(r);
+    }
+    return results;
+  }
+
   async putKey(key: string, entry: EntrySnapshot): Promise<void> {
     await this.keysContainer.items.upsert({
       id: toDocId(key),

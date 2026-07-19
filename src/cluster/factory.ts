@@ -13,6 +13,8 @@ export interface ClusterCoordinatorHostDeps {
   pubsub: PubSubRegistry;
   connectionCount(): number;
   commandsTotal(): number;
+  /** Wired by the process owner (index.ts) to a fatal shutdown when replication dies unrecoverably. */
+  onFatalReplicationError?: (err: Error) => void;
 }
 
 /**
@@ -91,6 +93,8 @@ export async function createClusterCoordinator(
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     nodeStaleMs: config.nodeStaleMs,
     maxMemoryBytes: config.maxMemoryBytes,
+    antiEntropyIntervalMs: config.antiEntropyIntervalMs,
+    onFatalReplicationError: deps.onFatalReplicationError,
     connectionCount: deps.connectionCount,
     commandsTotal: deps.commandsTotal,
   });

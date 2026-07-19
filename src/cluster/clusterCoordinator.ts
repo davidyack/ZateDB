@@ -38,6 +38,19 @@ export interface ClusterCoordinatorDeps {
    * log) once the loaded estimate crosses this. 0 or unset disables the bound.
    */
   maxMemoryBytes?: number;
+  /**
+   * How often to run anti-entropy re-hydration (re-load keys changed in the
+   * durable store since the last pass) as a convergence backstop for missed
+   * replication events. 0 or unset disables it.
+   */
+  antiEntropyIntervalMs?: number;
+  /**
+   * Invoked when the replication transport reports an unrecoverable receive
+   * condition (subscription gone / sustained errors). The process owner
+   * wires this to a fatal shutdown so a restart re-creates the subscription
+   * and re-hydrates, rather than the node diverging silently forever.
+   */
+  onFatalReplicationError?: (err: Error) => void;
   connectionCount(): number;
   commandsTotal(): number;
 }
@@ -81,6 +94,9 @@ export class ClusterCoordinator {
   private replicationQueue = new Map<string, ReplicationTask[]>();
   private draining = new Set<string>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private antiEntropyTimer: ReturnType<typeof setInterval> | null = null;
+  /** Watermark (durable updatedAtMs) up to which this node has reconciled; anti-entropy loads only rows newer than this. */
+  private lastSyncMs = 0;
 
   constructor(private readonly deps: ClusterCoordinatorDeps) {
     this.nodeId = deps.nodeId;
@@ -106,18 +122,65 @@ export class ClusterCoordinator {
     // the snapshot, never before it.
     let hydrating = true;
     const buffered: ReplicationEvent[] = [];
-    await this.deps.transport.start((event) => {
-      if (hydrating) buffered.push(event);
-      else this.applyRemoteEvent(event);
-    });
+    await this.deps.transport.start(
+      (event) => {
+        if (hydrating) buffered.push(event);
+        else this.applyRemoteEvent(event);
+      },
+      (err) => this.handleFatalReplicationError(err),
+    );
 
     await this.hydrate();
     hydrating = false;
     for (const event of buffered) this.applyRemoteEvent(event);
+    // Everything the durable store held at hydration time is now applied;
+    // anti-entropy only needs to chase writes newer than this point.
+    this.lastSyncMs = Date.now();
 
     this.heartbeatTimer = setInterval(() => this.track(this.heartbeat()), this.deps.heartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
     this.track(this.heartbeat());
+
+    const antiEntropyMs = this.deps.antiEntropyIntervalMs ?? 0;
+    if (antiEntropyMs > 0) {
+      this.antiEntropyTimer = setInterval(() => this.track(this.reconcile()), antiEntropyMs);
+      this.antiEntropyTimer.unref?.();
+    }
+  }
+
+  private handleFatalReplicationError(err: Error): void {
+    logger.error('cluster.replication_fatal', { nodeId: this.nodeId, error: errorMessage(err) });
+    this.deps.onFatalReplicationError?.(err);
+  }
+
+  /**
+   * Anti-entropy backstop: re-load every durable key written since the last
+   * pass and apply it locally, repairing anything this node missed while
+   * replication was briefly broken (a partition past the message TTL, a
+   * receiver blip). Applying the durable snapshot is safe under the
+   * last-write-wins model — Cosmos is the source of truth, and its
+   * field/member-patched documents already reflect the merged state — so a
+   * missed event converges on the next pass instead of lingering forever.
+   * Public so it can be driven deterministically in tests.
+   */
+  async reconcile(): Promise<void> {
+    if (!this.haEnabled) return;
+    try {
+      const changed = await this.deps.durable.loadChangedSince(this.lastSyncMs);
+      const now = Date.now();
+      let applied = 0;
+      let watermark = this.lastSyncMs;
+      for (const { key, entry, updatedAtMs } of changed) {
+        watermark = Math.max(watermark, updatedAtMs);
+        if (entry.expiresAtMs !== null && entry.expiresAtMs <= now) continue;
+        this.deps.store.applyReplicatedUpsert(key, snapshotToEntry(entry));
+        applied++;
+      }
+      this.lastSyncMs = watermark;
+      if (applied > 0) logger.info('cluster.anti_entropy_reconciled', { nodeId: this.nodeId, applied });
+    } catch (err) {
+      logger.warn('cluster.anti_entropy_failed', { nodeId: this.nodeId, error: errorMessage(err) });
+    }
   }
 
   private async hydrate(): Promise<void> {
@@ -394,6 +457,10 @@ export class ClusterCoordinator {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+    if (this.antiEntropyTimer) {
+      clearInterval(this.antiEntropyTimer);
+      this.antiEntropyTimer = null;
     }
     const pending = Array.from(this.inFlight);
     if (pending.length === 0) return;

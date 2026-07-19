@@ -239,6 +239,22 @@ mode.
   is also why a partially-configured environment (Cosmos DB set, Service
   Bus not, or vice versa) falls back to standalone instead of half-running
   HA — see [Standalone mode](#standalone-mode) above.
+- **Replication death is detected, not silent**: the receiver treats a
+  vanished subscription (`MessagingEntityNotFound`) or a sustained run of
+  receive errors as fatal and exits the process (non-zero), so the
+  orchestrator restarts a clean instance that re-creates its subscription
+  and re-hydrates. Because the receiver uses `receiveAndDelete`, anything
+  missed while it was broken is gone — "keep logging and hope" would mean
+  diverging forever, which is the failure this replaces.
+- **Anti-entropy backstop**: every `ANTI_ENTROPY_INTERVAL_MS` (default
+  5 min, matching the Service Bus message TTL) each node re-loads the
+  durable keys written since its last pass (`WHERE updatedAtMs > @since`)
+  and applies them locally. This is a cheap convergence safety net for
+  anything a node missed during a brief partition or receiver blip —
+  applying Cosmos's snapshot is safe under last-write-wins (Cosmos is the
+  source of truth, and its field/member-patched documents already reflect
+  the merged state), so a missed write converges on the next pass instead
+  of lingering until the key is next written. `0` disables it.
 - **Service Bus auth & permissions**: the app prefers **managed identity**
   (`SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE` + `DefaultAzureCredential`),
   falling back to a connection string only when that's all that's set —

@@ -147,6 +147,99 @@ describe('ClusterCoordinator HA mode: hydration filtering & bounding', () => {
   });
 });
 
+describe('ClusterCoordinator HA mode: anti-entropy & fatal detection', () => {
+  it('reconcile() re-applies durable writes this node missed while replication was broken', async () => {
+    const durable = new FakeDurableStore();
+    await durable.putKey('seeded', { type: 'string', value: 'v0', expiresAtMs: null });
+
+    const store = new Store(0);
+    const cluster = new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport: new FakeReplicationHub().createTransport('node-x'),
+      nodeId: 'node-x',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+    await cluster.start();
+    expect(store.get('seeded')).toBe('v0');
+
+    // A peer wrote a new key straight to the durable store, but this node
+    // never got the replication event (simulated: nothing delivered). Stamp
+    // its watermark in the future so it's unambiguously newer than the
+    // post-hydration sync point.
+    durable.keys.set('missed', { type: 'string', value: 'peer-write', expiresAtMs: null });
+    durable.setUpdatedAt('missed', Date.now() + 1_000_000);
+    expect(store.exists('missed')).toBe(false); // not seen yet
+
+    await cluster.reconcile();
+    expect(store.get('missed')).toBe('peer-write'); // convergence backstop repaired it
+
+    await cluster.stop();
+    store.close();
+  });
+
+  it('reconcile() skips durable rows that are already expired', async () => {
+    const durable = new FakeDurableStore();
+    const store = new Store(0);
+    const cluster = new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport: new FakeReplicationHub().createTransport('node-x'),
+      nodeId: 'node-x',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+    await cluster.start();
+
+    durable.keys.set('dead', { type: 'string', value: 'v', expiresAtMs: Date.now() - 1 });
+    durable.setUpdatedAt('dead', Date.now() + 1_000_000);
+    await cluster.reconcile();
+    expect(store.exists('dead')).toBe(false);
+
+    await cluster.stop();
+    store.close();
+  });
+
+  it('calls onFatalReplicationError when the transport reports an unrecoverable receive condition', async () => {
+    const durable = new FakeDurableStore();
+    const store = new Store(0);
+    const transport = new FakeReplicationHub().createTransport('node-x');
+    let fatal: Error | null = null;
+    const cluster = new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport,
+      nodeId: 'node-x',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      onFatalReplicationError: (err) => {
+        fatal = err;
+      },
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+    await cluster.start();
+
+    transport.simulateFatal(new Error('subscription vanished'));
+    expect(fatal).not.toBeNull();
+    expect((fatal as unknown as Error).message).toBe('subscription vanished');
+
+    await cluster.stop();
+    store.close();
+  });
+});
+
 describe('ClusterCoordinator HA mode: cross-node convergence', () => {
   let durable: FakeDurableStore;
   let hub: FakeReplicationHub;

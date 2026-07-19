@@ -14,6 +14,15 @@ export interface DurableStore {
   /** Every live key snapshot, for startup hydration. */
   loadAll(): Promise<Array<{ key: string; entry: EntrySnapshot }>>;
 
+  /**
+   * Live key snapshots written since `sinceMs` (by `updatedAtMs`), for
+   * periodic anti-entropy re-hydration — a cheap convergence backstop that
+   * repairs anything a node missed while replication was briefly broken
+   * (a partition past the message TTL, a receiver blip). Each row carries
+   * its `updatedAtMs` so the caller can advance its watermark.
+   */
+  loadChangedSince(sinceMs: number): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>>;
+
   /** Upserts the whole post-mutation state of a key (last-write-wins across nodes) — used for SET/INCR/EXPIRE/PEXPIRE. */
   putKey(key: string, entry: EntrySnapshot): Promise<void>;
 
@@ -61,6 +70,10 @@ export class NullDurableStore implements DurableStore {
   readonly kind = 'null' as const;
 
   async loadAll(): Promise<Array<{ key: string; entry: EntrySnapshot }>> {
+    return [];
+  }
+
+  async loadChangedSince(): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>> {
     return [];
   }
 

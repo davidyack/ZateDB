@@ -50,6 +50,14 @@ export interface ServerConfig {
   heartbeatIntervalMs: number;
   /** A peer node's heartbeat older than this is treated as dead and dropped from cluster admin views. */
   nodeStaleMs: number;
+  /**
+   * How often to run anti-entropy re-hydration (re-load durable keys
+   * changed since the last pass) as a convergence backstop for missed
+   * replication events. Defaults to the Service Bus message TTL (5 min), so
+   * a node partitioned past the point where events expire still catches up.
+   * 0 disables.
+   */
+  antiEntropyIntervalMs: number;
   /** How long startup (Cosmos DB / Service Bus connect + hydration) may take before failing fast instead of hanging indefinitely. */
   clusterStartupTimeoutMs: number;
   /**
@@ -115,6 +123,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     cosmosNodesContainer: env.COSMOS_NODES_CONTAINER || 'nodes',
     heartbeatIntervalMs: intFromEnv(env, 'HEARTBEAT_INTERVAL_MS', 10_000),
     nodeStaleMs: intFromEnv(env, 'NODE_STALE_MS', 30_000),
+    antiEntropyIntervalMs: intFromEnv(env, 'ANTI_ENTROPY_INTERVAL_MS', 5 * 60_000),
     clusterStartupTimeoutMs: intFromEnv(env, 'CLUSTER_STARTUP_TIMEOUT_MS', 30_000),
     shutdownHardLimitMs: intFromEnv(env, 'SHUTDOWN_HARD_LIMIT_MS', 10_000),
     requireHa: boolExact(env.REQUIRE_HA, false),

@@ -11,20 +11,45 @@ export class FakeDurableStore implements DurableStore {
   readonly kind = 'cosmos' as const;
   readonly keys = new Map<string, EntrySnapshot>();
   readonly nodes = new Map<string, NodeSnapshot>();
+  /** Per-key last-write watermark, mirroring Cosmos's updatedAtMs — backs loadChangedSince. */
+  readonly updatedAt = new Map<string, number>();
+  private clock = 0;
+
+  /** Strictly-monotonic write timestamp so same-millisecond writes still order (and tests can reason about watermarks). */
+  private nextTs(): number {
+    this.clock = Math.max(Date.now(), this.clock + 1);
+    return this.clock;
+  }
+  /** Test hook: stamp a key's watermark explicitly (e.g. to simulate a peer's write that arrived out of band). */
+  setUpdatedAt(key: string, ms: number): void {
+    this.updatedAt.set(key, ms);
+    this.clock = Math.max(this.clock, ms);
+  }
 
   async loadAll(): Promise<Array<{ key: string; entry: EntrySnapshot }>> {
     return Array.from(this.keys.entries()).map(([key, entry]) => ({ key, entry }));
   }
+  async loadChangedSince(sinceMs: number): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>> {
+    const out: Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }> = [];
+    for (const [key, entry] of this.keys) {
+      const updatedAtMs = this.updatedAt.get(key) ?? 0;
+      if (updatedAtMs > sinceMs) out.push({ key, entry, updatedAtMs });
+    }
+    return out;
+  }
   async putKey(key: string, entry: EntrySnapshot): Promise<void> {
     this.keys.set(key, entry);
+    this.updatedAt.set(key, this.nextTs());
   }
   async deleteKey(key: string): Promise<void> {
     this.keys.delete(key);
+    this.updatedAt.delete(key);
   }
   async putTtl(key: string, expiresAtMs: number | null): Promise<void> {
     const existing = this.keys.get(key);
     if (existing === undefined) return; // EXPIRE can't create a key
     this.keys.set(key, { ...existing, expiresAtMs });
+    this.updatedAt.set(key, this.nextTs());
   }
   async putHashFields(key: string, fields: Array<[string, string]>): Promise<void> {
     const existing = this.keys.get(key);
@@ -32,6 +57,7 @@ export class FakeDurableStore implements DurableStore {
     const merged = { ...base };
     for (const [field, value] of fields) merged[field] = value;
     this.keys.set(key, { type: 'hash', fields: merged, expiresAtMs: existing?.type === 'hash' ? existing.expiresAtMs : null });
+    this.updatedAt.set(key, this.nextTs());
   }
   async deleteHashFields(key: string, fields: string[]): Promise<void> {
     const existing = this.keys.get(key);
@@ -39,6 +65,7 @@ export class FakeDurableStore implements DurableStore {
     const merged = { ...existing.fields };
     for (const field of fields) delete merged[field];
     this.keys.set(key, { ...existing, fields: merged });
+    this.updatedAt.set(key, this.nextTs());
   }
   async putZsetMembers(key: string, members: Array<[string, number]>): Promise<void> {
     const existing = this.keys.get(key);
@@ -46,6 +73,7 @@ export class FakeDurableStore implements DurableStore {
     const merged = { ...base };
     for (const [member, score] of members) merged[member] = score;
     this.keys.set(key, { type: 'sortedset', members: merged, expiresAtMs: existing?.type === 'sortedset' ? existing.expiresAtMs : null });
+    this.updatedAt.set(key, this.nextTs());
   }
   async deleteZsetMembers(key: string, members: string[]): Promise<void> {
     const existing = this.keys.get(key);
@@ -53,6 +81,7 @@ export class FakeDurableStore implements DurableStore {
     const merged = { ...existing.members };
     for (const member of members) delete merged[member];
     this.keys.set(key, { ...existing, members: merged });
+    this.updatedAt.set(key, this.nextTs());
   }
   async putNodeSnapshot(snapshot: NodeSnapshot): Promise<void> {
     this.nodes.set(snapshot.nodeId, snapshot);
@@ -75,7 +104,7 @@ export class FakeDurableStore implements DurableStore {
 export class FakeReplicationHub {
   private readonly transports = new Set<FakeReplicationTransport>();
 
-  createTransport(nodeId: string): ReplicationTransport {
+  createTransport(nodeId: string): FakeReplicationTransport {
     return new FakeReplicationTransport(nodeId, this);
   }
 
@@ -92,15 +121,22 @@ export class FakeReplicationHub {
   }
 }
 
-class FakeReplicationTransport implements ReplicationTransport {
+export class FakeReplicationTransport implements ReplicationTransport {
   readonly kind = 'null' as const;
   private onMessage: ((event: ReplicationEvent) => void) | null = null;
+  private onFatal: ((err: Error) => void) | null = null;
 
   constructor(private readonly nodeId: string, private readonly hub: FakeReplicationHub) {}
 
-  async start(onMessage: (event: ReplicationEvent) => void): Promise<void> {
+  async start(onMessage: (event: ReplicationEvent) => void, onFatal?: (err: Error) => void): Promise<void> {
     this.onMessage = onMessage;
+    this.onFatal = onFatal ?? null;
     this.hub.register(this);
+  }
+
+  /** Test hook: simulate the transport detecting an unrecoverable receive condition (subscription gone / sustained errors). */
+  simulateFatal(err: Error): void {
+    this.onFatal?.(err);
   }
 
   async publish(event: ReplicationEvent): Promise<void> {
