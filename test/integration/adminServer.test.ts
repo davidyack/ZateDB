@@ -15,11 +15,18 @@ interface Harness {
   stop: () => Promise<void>;
 }
 
-async function startAdmin(cluster?: ClusterCoordinator): Promise<Harness> {
+/** A ClusterCoordinator plus the exact Store/PubSubRegistry it was built with — RespServer/AdminServer must use the same pair, or a command applied through one and read back through the other would silently diverge. */
+interface HaOverride {
+  store: Store;
+  pubsub: PubSubRegistry;
+  cluster: ClusterCoordinator;
+}
+
+async function startAdmin(ha?: HaOverride): Promise<Harness> {
   const config = { ...loadConfig({}), respPort: 0, healthPort: 0, adminPort: 0 };
-  const store = new Store(0);
-  const pubsub = new PubSubRegistry();
-  const resolvedCluster = cluster ?? standaloneCluster(store, pubsub);
+  const store = ha?.store ?? new Store(0);
+  const pubsub = ha?.pubsub ?? new PubSubRegistry();
+  const resolvedCluster = ha?.cluster ?? standaloneCluster(store, pubsub);
   await resolvedCluster.start();
   const respServer = new RespServer(store, pubsub, config, resolvedCluster);
   const adminServer = new AdminServer(store, pubsub, respServer, config, resolvedCluster);
@@ -87,10 +94,10 @@ describe('Admin API (HA mode)', () => {
   async function startPair() {
     durable = new FakeDurableStore();
     const hub = new FakeReplicationHub();
-    const build = (nodeId: string) => {
+    const build = (nodeId: string): HaOverride => {
       const store = new Store(0);
       const pubsub = new PubSubRegistry();
-      return new ClusterCoordinator({
+      const cluster = new ClusterCoordinator({
         store,
         pubsub,
         durable,
@@ -102,6 +109,7 @@ describe('Admin API (HA mode)', () => {
         connectionCount: () => 0,
         commandsTotal: () => 0,
       });
+      return { store, pubsub, cluster };
     };
     harnessA = await startAdmin(build('node-a'));
     harnessB = await startAdmin(build('node-b'));
@@ -130,6 +138,16 @@ describe('Admin API (HA mode)', () => {
   it('DELETE /admin/keys/:key propagates the delete to the other node via the durable store', async () => {
     await startPair();
     harnessA.store.set('shared', 'v');
+    harnessA.cluster.publishKeyChange('shared');
+    // Prove the key actually reached the durable store first — otherwise
+    // the delete-propagation assertion below would be trivially true even
+    // if propagation were completely broken (nothing to begin with).
+    const setStart = Date.now();
+    while (!durable.keys.has('shared') && Date.now() - setStart < 1000) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(durable.keys.has('shared')).toBe(true);
+
     const res = await fetch(`${harnessA.adminUrl}/admin/keys/shared`, { method: 'DELETE' });
     expect(res.status).toBe(200);
 
