@@ -1,4 +1,11 @@
-FROM node:20-slim AS build
+# Pinned to a specific Node 20 LTS patch rather than the floating `node:20-slim`
+# tag, so a rebuild can't silently pull a different base. For a fully
+# reproducible, tamper-evident build, pin by digest instead — override at build
+# time with `--build-arg NODE_IMAGE=node:20.18.1-slim@sha256:<digest>` (resolve
+# the current digest with `docker buildx imagetools inspect node:20.18.1-slim`).
+ARG NODE_IMAGE=node:20.18.1-slim
+
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -6,7 +13,7 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
 
-FROM node:20-slim AS runtime
+FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
