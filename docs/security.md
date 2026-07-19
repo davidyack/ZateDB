@@ -10,7 +10,17 @@
   independently rotatable — different blast radius. The `AUTH` password
   lets a caller read/write cache data as the app would; the admin token
   lets a caller inspect and delete arbitrarily via the
-  [admin surface](./observability.md#admin-api).
+  [admin surface](./observability.md#admin-api). In HA mode, a `DELETE`
+  through the admin API propagates cluster-wide, so the admin token's
+  blast radius is the whole cluster, not just the node answering the
+  request.
+- **The Service Bus and Cosmos DB connection strings are separate secrets
+  again**, pulled from Key Vault the same way as `REDIS_AUTH_PASSWORD`/
+  `ADMIN_TOKEN` (see [`infra/backendcache.bicep`](../infra/backendcache.bicep)).
+  The Service Bus policy needs Manage rights (to create/delete its own
+  subscription per node), which is a wider grant than Send/Listen alone —
+  scope it to a dedicated policy on the replication topic, not a
+  namespace-root policy shared with unrelated queues/topics.
 - **No `EVAL`/scripting support** means no arbitrary code execution
   surface — a structurally smaller attack surface than a general-purpose
   Redis-compatible engine, and a genuine security property of the

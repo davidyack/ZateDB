@@ -3,6 +3,7 @@ import { Connection } from './connection.js';
 import type { Store } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { ServerConfig } from '../config.js';
+import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 import { logger } from '../logger.js';
 
 export class RespServer {
@@ -10,7 +11,12 @@ export class RespServer {
   private connections = new Set<Connection>();
   private accepting = true;
 
-  constructor(private readonly store: Store, private readonly pubsub: PubSubRegistry, private readonly config: ServerConfig) {
+  constructor(
+    private readonly store: Store,
+    private readonly pubsub: PubSubRegistry,
+    private readonly config: ServerConfig,
+    private readonly cluster: ClusterCoordinator,
+  ) {
     this.server = createServer((socket) => this.onConnect(socket));
   }
 
@@ -35,7 +41,7 @@ export class RespServer {
       socket.destroy();
       return;
     }
-    const conn = new Connection(socket, { store: this.store, pubsub: this.pubsub, config: this.config });
+    const conn = new Connection(socket, { store: this.store, pubsub: this.pubsub, config: this.config, cluster: this.cluster });
     this.connections.add(conn);
     socket.on('close', () => this.connections.delete(conn));
   }

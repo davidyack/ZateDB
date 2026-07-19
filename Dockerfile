@@ -11,10 +11,17 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --omit=optional && npm cache clean --force
-# Optional OpenTelemetry exporter deps are best-effort — install them but
-# don't fail the image build if the registry resolution has issues.
+# Optional OpenTelemetry exporter and Azure HA (Cosmos DB / Service Bus)
+# deps are best-effort — install them but don't fail the image build if
+# the registry resolution has issues. Without them the process still
+# starts, in standalone (single-node) mode for the HA deps or with
+# telemetry degraded to a no-op provider — see cluster/factory.ts and
+# telemetry/otel.ts.
 RUN npm install --omit=dev \
+    @azure/cosmos \
+    @azure/identity \
     @azure/monitor-opentelemetry-exporter \
+    @azure/service-bus \
     @opentelemetry/exporter-metrics-otlp-http \
     @opentelemetry/exporter-trace-otlp-http \
     @opentelemetry/resources \
@@ -22,7 +29,7 @@ RUN npm install --omit=dev \
     @opentelemetry/sdk-node \
     @opentelemetry/sdk-trace-node \
     @opentelemetry/semantic-conventions \
-    || echo "optional telemetry exporters not installed; continuing without export"
+    || echo "optional telemetry/HA exporters not installed; continuing in standalone/no-export mode"
 COPY --from=build /app/dist ./dist
 
 EXPOSE 6379 8081 8082

@@ -56,6 +56,25 @@ export interface DispatchOutcome extends CommandResult {
   isError: boolean;
 }
 
+/** Single-key mutating commands — the affected key is always args[0]. */
+const SINGLE_KEY_MUTATORS: ReadonlySet<string> = new Set([
+  'SET',
+  'INCR',
+  'EXPIRE',
+  'PEXPIRE',
+  'HSET',
+  'HDEL',
+  'ZADD',
+  'ZREMRANGEBYSCORE',
+]);
+
+/** Keys touched by a successful mutating command, for cluster replication. DEL can touch several. */
+function mutatedKeysFor(command: string, args: string[]): string[] {
+  if (command === 'DEL') return args;
+  if (SINGLE_KEY_MUTATORS.has(command) && args.length > 0) return [args[0]];
+  return [];
+}
+
 export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcome {
   const command = (rawArgs[0] ?? '').toUpperCase();
   const args = rawArgs.slice(1);
@@ -75,6 +94,20 @@ export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcom
 
   const outcome = cmdSpec.handler(ctx, args);
   const isError = outcome.frames.some((f) => f.type === 'error');
+
+  // Cluster replication is centralized here (rather than in each command
+  // handler) so the handlers stay unaware of HA at all: the in-memory
+  // mutation already happened synchronously above, and this only decides
+  // what to ship out to the durable store / other nodes. Fire-and-forget —
+  // the client's reply already reflects the fast local result.
+  if (!isError) {
+    if (command === 'PUBLISH') {
+      ctx.cluster.publishMessage(args[0], args[1]);
+    } else {
+      for (const key of mutatedKeysFor(command, args)) ctx.cluster.publishKeyChange(key);
+    }
+  }
+
   return { command, ...outcome, isError };
 }
 

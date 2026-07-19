@@ -262,6 +262,42 @@ export class Store {
   deleteKey(key: string): boolean {
     return this.del([key]) === 1;
   }
+
+  // ---- cluster hydration / replication ---------------------------------
+
+  /**
+   * Raw entry for a key, bypassing type-narrowing helpers — used by the
+   * cluster coordinator to snapshot post-mutation state for durable
+   * persistence and cross-node replication. Returns undefined for a
+   * missing or expired key.
+   */
+  getRawEntry(key: string): Entry | undefined {
+    return this.getLive(key);
+  }
+
+  /** All live (non-expired) key/entry pairs — used for admin listing and full-state hand-offs. */
+  *allEntries(): IterableIterator<[string, Entry]> {
+    const now = Date.now();
+    for (const [key, entry] of this.data) {
+      if (!this.isExpired(entry, now)) yield [key, entry];
+    }
+  }
+
+  /**
+   * Overwrites a key with an absolute entry snapshot — used both to
+   * hydrate from the durable store at startup and to apply a mutation
+   * replicated from another node. Never triggers further
+   * persistence/replication itself; the caller (ClusterCoordinator) owns
+   * that decision so applying a remote event doesn't re-broadcast it.
+   */
+  applyReplicatedUpsert(key: string, entry: Entry): void {
+    this.data.set(key, entry);
+  }
+
+  /** Removes a key as a result of hydration or a replicated delete, without cascading further replication. */
+  applyReplicatedDelete(key: string): void {
+    this.data.delete(key);
+  }
 }
 
 function estimateEntrySize(key: string, entry: Entry): number {

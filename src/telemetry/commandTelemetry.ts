@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { metrics, SpanStatusCode, trace } from '@opentelemetry/api';
+import type { Attributes } from '@opentelemetry/api';
 import type { DispatchOutcome } from '../commands/dispatcher.js';
+import type { Store } from '../store/store.js';
 
 const tracer = trace.getTracer('backendcache');
 const meter = metrics.getMeter('backendcache');
@@ -20,6 +22,28 @@ const pubsubSubscriptionsActive = meter.createUpDownCounter('backendcache.pubsub
 const adminActionsTotal = meter.createCounter('backendcache.admin.actions.total', {
   description: 'Admin API actions, by action and result',
 });
+const keysGauge = meter.createObservableGauge('backendcache.keys.count', {
+  description: 'Live keys held in this node\'s in-memory store, by type',
+});
+
+let keyCountsSource: (() => ReturnType<Store['stats']>) | null = null;
+
+/**
+ * Wires the key-count gauge to a live Store. Called once at startup
+ * (index.ts) — kept as a lazily-bound callback rather than a constructor
+ * dependency so this module (imported by command handlers before the
+ * Store exists) doesn't need to know about wiring order.
+ */
+export function bindKeyCountsSource(getStats: () => ReturnType<Store['stats']>): void {
+  keyCountsSource = getStats;
+  keysGauge.addCallback((result) => {
+    const stats = keyCountsSource?.();
+    if (!stats) return;
+    for (const [type, count] of Object.entries(stats.keyCounts)) {
+      result.observe(count, { type });
+    }
+  });
+}
 
 /**
  * Redacts a key before it lands in a span attribute. Key names in this
@@ -88,4 +112,29 @@ export function recordSubscriptionChange(kind: 'channel' | 'pattern', delta: num
 
 export function recordAdminAction(action: string, resultLabel: 'success' | 'error'): void {
   adminActionsTotal.add(1, { action, result: resultLabel });
+}
+
+/**
+ * Connection open/close happen outside any command's span (a connection
+ * can sit open for a long time before its first command, and a Socket.IO
+ * adapter subscriber connection can live for the process's entire
+ * lifetime — see docs/architecture.md on why there's no per-connection
+ * span). Each lifecycle transition instead gets its own near-zero-duration
+ * span carrying one event: the idiomatic OTel shape for a bounded moment
+ * with no natural parent span to attach to.
+ */
+export function recordConnectionLifecycleEvent(name: string, attributes: Attributes): void {
+  const span = tracer.startSpan(`backendcache.${name}`);
+  span.addEvent(name, attributes);
+  span.end();
+}
+
+/**
+ * Subscribe/unsubscribe happen inside the SUBSCRIBE/UNSUBSCRIBE command's
+ * own span (traceCommand's startActiveSpan makes it the active span for
+ * the duration of the handler call), so this attaches an event to that
+ * span rather than creating a new one.
+ */
+export function recordSubscriptionLifecycleEvent(name: string, attributes: Attributes): void {
+  trace.getActiveSpan()?.addEvent(name, attributes);
 }

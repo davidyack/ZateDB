@@ -2,6 +2,7 @@ import type { Store } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { RespValue } from '../resp/types.js';
 import type { ServerConfig } from '../config.js';
+import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 
 export type ConnectionMode = 'handshake' | 'command' | 'subscriber';
 
@@ -24,6 +25,7 @@ export interface CommandContext {
   pubsub: PubSubRegistry;
   conn: ConnectionContext;
   config: ServerConfig;
+  cluster: ClusterCoordinator;
 }
 
 export interface CommandResult {

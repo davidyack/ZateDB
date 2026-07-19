@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from '../../src/config.js';
+import { isHaConfigured, loadConfig } from '../../src/config.js';
 
 describe('loadConfig', () => {
   it('reads every value from the supplied env, not the ambient process.env', () => {
@@ -38,5 +38,37 @@ describe('loadConfig', () => {
   it('falls back to the default when a numeric env value is not a number', () => {
     const config = loadConfig({ RESP_PORT: 'not-a-port' } as unknown as NodeJS.ProcessEnv);
     expect(config.respPort).toBe(6379);
+  });
+});
+
+describe('isHaConfigured', () => {
+  it('is false with no cluster env vars set (standalone mode)', () => {
+    expect(isHaConfigured(loadConfig({} as NodeJS.ProcessEnv))).toBe(false);
+  });
+
+  it('is false when only Cosmos DB is configured (no Service Bus)', () => {
+    const config = loadConfig({ COSMOS_CONNECTION_STRING: 'AccountEndpoint=https://x;AccountKey=y' } as unknown as NodeJS.ProcessEnv);
+    expect(isHaConfigured(config)).toBe(false);
+  });
+
+  it('is false when only Service Bus is configured (no Cosmos DB)', () => {
+    const config = loadConfig({ SERVICE_BUS_CONNECTION_STRING: 'Endpoint=sb://x' } as unknown as NodeJS.ProcessEnv);
+    expect(isHaConfigured(config)).toBe(false);
+  });
+
+  it('is true once both a durable store and a replication transport are configured', () => {
+    const config = loadConfig({
+      COSMOS_CONNECTION_STRING: 'AccountEndpoint=https://x;AccountKey=y',
+      SERVICE_BUS_CONNECTION_STRING: 'Endpoint=sb://x',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(isHaConfigured(config)).toBe(true);
+  });
+
+  it('also accepts a Cosmos endpoint (AAD auth) in place of a connection string', () => {
+    const config = loadConfig({
+      COSMOS_ENDPOINT: 'https://x.documents.azure.com',
+      SERVICE_BUS_CONNECTION_STRING: 'Endpoint=sb://x',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(isHaConfigured(config)).toBe(true);
   });
 });

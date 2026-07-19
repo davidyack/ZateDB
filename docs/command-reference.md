@@ -51,9 +51,9 @@ milliseconds.
 
 | Excluded | Why |
 |---|---|
-| `EVAL` / `EVALSHA` / `SCRIPT LOAD` (Lua scripting) | No embedded Lua runtime. `rate-limit-redis`'s default store needs this — see [The rate-limit store deviation](./rate-limit-store.md) for the one place a consuming app needs a small workaround. |
-| Persistence (RDB, AOF) | Everything here is intentionally ephemeral, matching real Redis pub/sub's own fire-and-forget semantics. |
-| Clustering / sharding / replication / multi-node HA | Single process, single dataset, single replica by design — see [Architecture](./architecture.md#why-single-replica). |
+| `EVAL` / `EVALSHA` / `SCRIPT LOAD` (Lua scripting) | No embedded Lua runtime — and none is needed for cross-node atomicity either: HA replication and Cosmos DB persistence are both plain upserts/deletes, no stored procedures. `rate-limit-redis`'s default store needs Lua — see [The rate-limit store deviation](./rate-limit-store.md) for the one place a consuming app needs a small workaround. |
+| Redis-native persistence (RDB snapshots, AOF) | Durability is handled differently here — key state is persisted to Cosmos DB as part of cross-node replication (see [High availability](./high-availability.md)), not via Redis's own snapshot/append-only-file formats. `PUBLISH` messages are still never persisted anywhere, matching real Redis pub/sub's fire-and-forget semantics. |
+| Redis-native clustering/sharding (`CLUSTER *`, hash slots) | BackendCache's own multi-node HA (see [High availability](./high-availability.md)) is a from-scratch active-active design over Service Bus + Cosmos DB, not an implementation of Redis Cluster's protocol — no consuming app in scope talks `CLUSTER *`. |
 | RESP3, ACLs, other data types (lists, sets, streams, geo, bitmaps, HyperLogLog) | Add on demand when a real caller needs them; don't build speculatively. |
 | TLS termination in-process | Assumes a private, same-environment network hop (e.g. Container Apps internal ingress). Terminate TLS upstream if your network policy requires it in transit. |
 

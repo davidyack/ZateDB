@@ -2,7 +2,7 @@ import { array, bulk, integer } from '../resp/types.js';
 import type { RespValue } from '../resp/types.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { wrongArgsError } from './errors.js';
-import { recordSubscriptionChange } from '../telemetry/commandTelemetry.js';
+import { recordSubscriptionChange, recordSubscriptionLifecycleEvent } from '../telemetry/commandTelemetry.js';
 
 function confirmation(kind: string, name: string | null, count: number): RespValue {
   return array([bulk(kind), name === null ? bulk(null) : bulk(name), integer(count)]);
@@ -19,7 +19,10 @@ export function subscribe(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length < 1) return { frames: [wrongArgsError('subscribe')] };
   const frames: RespValue[] = [];
   for (const channel of args) {
-    if (ctx.pubsub.subscribeChannel(ctx.conn, channel)) recordSubscriptionChange('channel', 1);
+    if (ctx.pubsub.subscribeChannel(ctx.conn, channel)) {
+      recordSubscriptionChange('channel', 1);
+      recordSubscriptionLifecycleEvent('subscription.added', { connectionId: ctx.conn.id, kind: 'channel', channel });
+    }
     ctx.conn.mode = 'subscriber';
     frames.push(confirmation('subscribe', channel, ctx.conn.totalSubscriptions()));
   }
@@ -30,7 +33,10 @@ export function psubscribe(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length < 1) return { frames: [wrongArgsError('psubscribe')] };
   const frames: RespValue[] = [];
   for (const pattern of args) {
-    if (ctx.pubsub.subscribePattern(ctx.conn, pattern)) recordSubscriptionChange('pattern', 1);
+    if (ctx.pubsub.subscribePattern(ctx.conn, pattern)) {
+      recordSubscriptionChange('pattern', 1);
+      recordSubscriptionLifecycleEvent('subscription.added', { connectionId: ctx.conn.id, kind: 'pattern', pattern });
+    }
     ctx.conn.mode = 'subscriber';
     frames.push(confirmation('psubscribe', pattern, ctx.conn.totalSubscriptions()));
   }
@@ -44,7 +50,10 @@ export function unsubscribe(ctx: CommandContext, args: string[]): CommandResult 
     frames.push(confirmation('unsubscribe', null, ctx.conn.totalSubscriptions()));
   } else {
     for (const channel of channels) {
-      if (ctx.pubsub.unsubscribeChannel(ctx.conn, channel)) recordSubscriptionChange('channel', -1);
+      if (ctx.pubsub.unsubscribeChannel(ctx.conn, channel)) {
+        recordSubscriptionChange('channel', -1);
+        recordSubscriptionLifecycleEvent('subscription.removed', { connectionId: ctx.conn.id, kind: 'channel', channel });
+      }
       frames.push(confirmation('unsubscribe', channel, ctx.conn.totalSubscriptions()));
     }
   }
@@ -59,7 +68,10 @@ export function punsubscribe(ctx: CommandContext, args: string[]): CommandResult
     frames.push(confirmation('punsubscribe', null, ctx.conn.totalSubscriptions()));
   } else {
     for (const pattern of patterns) {
-      if (ctx.pubsub.unsubscribePattern(ctx.conn, pattern)) recordSubscriptionChange('pattern', -1);
+      if (ctx.pubsub.unsubscribePattern(ctx.conn, pattern)) {
+        recordSubscriptionChange('pattern', -1);
+        recordSubscriptionLifecycleEvent('subscription.removed', { connectionId: ctx.conn.id, kind: 'pattern', pattern });
+      }
       frames.push(confirmation('punsubscribe', pattern, ctx.conn.totalSubscriptions()));
     }
   }

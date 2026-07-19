@@ -5,20 +5,29 @@
 A token-gated JSON API on its own port
 ([`src/http/adminServer.ts`](../src/http/adminServer.ts), `:8082` by
 default — separate from the RESP port and `/healthz`), for
-`curl`/support-tooling use. No UI in v1.
+`curl`/support-tooling use. No UI.
 
 Every request requires `Authorization: Bearer <ADMIN_TOKEN>`. If
 `ADMIN_TOKEN` isn't set, the admin API relies on network isolation alone —
 set it in any environment where the admin port is reachable by more than
 trusted operators.
 
+Any node can answer any admin request — Container Apps' internal ingress
+has no way to target one specific replica. In standalone (single-node)
+mode every endpoint reflects only this process; in HA (multi-node) mode,
+`/admin/stats` and `/admin/pubsub` also report a cluster-wide view
+assembled from every node's periodic heartbeat snapshot (see
+[High availability](./high-availability.md#3-heartbeat)), and
+`/admin/nodes` lists cluster membership directly.
+
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/admin/stats` | GET | Uptime, connection count, key counts by type, subscription counts, command throughput, memory estimate. |
-| `/admin/keys?prefix=&limit=&offset=` | GET | Paginated key names + type + TTL — deliberately does **not** return values by default, to avoid a debug endpoint becoming a bulk-data-exfiltration surface even on an internal network. |
+| `/admin/stats` | GET | Uptime, connection count, key counts by type, subscription counts, command throughput, memory estimate — all for this node, plus a `cluster` object (node count, summed connections/commands/key counts, per-node heartbeat) when HA is enabled. |
+| `/admin/keys?prefix=&limit=&offset=` | GET | Paginated key names + type + TTL, from this node's in-memory copy — deliberately does **not** return values by default, to avoid a debug endpoint becoming a bulk-data-exfiltration surface even on an internal network. |
 | `/admin/keys/:key` | GET | Full detail (type, value/members, TTL) for one specific key — an explicit, targeted action for debugging a single stuck client, not a bulk dump. |
-| `/admin/keys/:key` | DELETE | Manually clear a stuck key (e.g. unblock a wrongly rate-limited client). Destructive — logged and emitted as a metric, not a silent debug tool. |
-| `/admin/pubsub` | GET | Active channels/patterns with subscriber counts. Topology only, no message content. |
+| `/admin/keys/:key` | DELETE | Manually clear a stuck key (e.g. unblock a wrongly rate-limited client). In HA mode this propagates cluster-wide via the same replication path a client's `DEL` uses, not just locally. Destructive — logged and emitted as a metric, not a silent debug tool. |
+| `/admin/pubsub` | GET | Active channels/patterns with subscriber counts for this node. In HA mode, also a merged cluster-wide view and a per-node breakdown. Topology only, no message content. |
+| `/admin/nodes` | GET | Cluster membership: every node with a live heartbeat (`nodeId`, last heartbeat, connection count, key counts, subscriptions), the queried node marked `self`. In standalone mode, just this node. |
 
 ## OpenTelemetry
 
@@ -48,14 +57,26 @@ Attributes: `db.system = "backendcache"`, `db.operation = <COMMAND>`,
 hash suffix) before it lands in a span attribute, since a key name can
 embed identifying data.
 
-Connection open/close and subscribe/unsubscribe are structured log lines,
-not spans — they're lifecycle markers on a long-lived object, not bounded
-operations.
+Connection open/close and subscribe/unsubscribe lifecycle transitions are
+recorded as **span events** ([`src/telemetry/commandTelemetry.ts`](../src/telemetry/commandTelemetry.ts)),
+not full spans — a Socket.IO adapter's subscriber connection can live for
+the process's entire lifetime, and a span spanning hours is the same
+anti-pattern either way:
+
+- Subscribe/unsubscribe (`subscription.added` / `subscription.removed`)
+  attach to the currently-active span, which is the `SUBSCRIBE`/
+  `UNSUBSCRIBE` command's own span — a real, bounded operation already in
+  progress.
+- Connection open/close (`connection.opened` / `connection.closed`) have
+  no such natural parent (a connection can sit open before its first
+  command), so each gets its own near-zero-duration span carrying a
+  single event — the idiomatic OTel shape for a bounded moment with
+  nothing to attach to.
 
 **Known limitation**: RESP has no header/metadata channel, so there's no
 way to propagate a calling request's `traceparent` into a BackendCache
 command span — BackendCache spans are self-contained, not children of the
-originating request's trace. This is an accepted v1 gap.
+originating request's trace. This is an accepted gap.
 
 ### Metrics
 
@@ -66,11 +87,13 @@ originating request's trace. This is an accepted v1 gap.
 | `backendcache.connections.active` | UpDownCounter | — |
 | `backendcache.pubsub.subscriptions.active` | UpDownCounter | `type` (channel/pattern) |
 | `backendcache.admin.actions.total` | Counter | `action`, `result` |
+| `backendcache.keys.count` | Observable gauge | `type` (string/hash/sortedset) — this node's live in-memory key count, sampled on export |
 
 ### Logs
 
 Structured JSON logs to stdout/stderr
 ([`src/logger.ts`](../src/logger.ts)) for connection open/close, command
-errors, TTL sweep activity, and every admin action. Kept lightweight —
-BackendCache is infrastructure, not an agent with its own observability
-conventions.
+errors, TTL sweep activity, every admin action, and cluster lifecycle
+events (hydration, heartbeat failures, replication failures, Service Bus
+subscription setup/teardown). Kept lightweight — BackendCache is
+infrastructure, not an agent with its own observability conventions.
