@@ -44,6 +44,14 @@ export interface ServerConfig {
   /** How long startup (Cosmos DB / Service Bus connect + hydration) may take before failing fast instead of hanging indefinitely. */
   clusterStartupTimeoutMs: number;
   /**
+   * Hard ceiling on graceful shutdown. cluster.stop() makes network calls
+   * (replication drain, Service Bus subscription delete, client close); if
+   * they hang — especially on the crash path, where the process is already
+   * unhealthy — this timer force-exits rather than leaving a zombie the
+   * orchestrator can't restart.
+   */
+  shutdownHardLimitMs: number;
+  /**
    * When true, the process refuses to start in standalone mode: HA must be
    * fully configured (both Cosmos DB and Service Bus) or startup fails.
    * Set in the multi-replica Bicep deployment so a typo'd env var or a
@@ -97,6 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     heartbeatIntervalMs: intFromEnv(env, 'HEARTBEAT_INTERVAL_MS', 10_000),
     nodeStaleMs: intFromEnv(env, 'NODE_STALE_MS', 30_000),
     clusterStartupTimeoutMs: intFromEnv(env, 'CLUSTER_STARTUP_TIMEOUT_MS', 30_000),
+    shutdownHardLimitMs: intFromEnv(env, 'SHUTDOWN_HARD_LIMIT_MS', 10_000),
     requireHa: boolExact(env.REQUIRE_HA, false),
   };
 }

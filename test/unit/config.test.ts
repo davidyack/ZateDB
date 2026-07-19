@@ -33,6 +33,7 @@ describe('loadConfig', () => {
     expect(config.ttlSweepIntervalMs).toBe(5000);
     expect(config.authPassword).toBeNull();
     expect(config.adminToken).toBeNull();
+    expect(config.shutdownHardLimitMs).toBe(10_000);
   });
 
   it('falls back to the default when a numeric env value is not a number', () => {

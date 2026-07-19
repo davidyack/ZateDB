@@ -100,15 +100,33 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info('backendcache.shutting_down', { signal });
+    // Hard deadline: graceful shutdown awaits cluster.stop(), which makes
+    // network calls to Cosmos DB / Service Bus (drain, subscription delete,
+    // client close). On the crash path (uncaughtException / unhandledRejection)
+    // the process is already in a bad state, and any of those calls hanging
+    // would leave a zombie that never exits — worse than an abrupt exit the
+    // orchestrator can restart. This timer force-exits regardless; unref() so
+    // it never itself keeps the process alive if the clean path wins the race.
+    const hardExit = setTimeout(() => {
+      logger.error('backendcache.shutdown_timeout', { signal, limitMs: config.shutdownHardLimitMs });
+      process.exit(exitCode);
+    }, config.shutdownHardLimitMs);
+    hardExit.unref?.();
     // Flip readiness before closing the listener so the orchestrator drains us
     // out of rotation instead of racing a connection into a closing socket.
     healthServer.setNotReady();
     stopSaturationMetrics();
-    await Promise.all([respServer.shutdown(), healthServer.close(), adminServer.close()]);
-    await cluster.stop();
-    store.close();
-    await telemetry.shutdown();
-    logger.info('backendcache.stopped', {});
+    try {
+      await Promise.all([respServer.shutdown(), healthServer.close(), adminServer.close()]);
+      await cluster.stop();
+      store.close();
+      await telemetry.shutdown();
+      logger.info('backendcache.stopped', {});
+    } catch (err) {
+      logger.error('backendcache.shutdown_error', { error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      clearTimeout(hardExit);
+    }
     process.exit(exitCode);
   };
 
