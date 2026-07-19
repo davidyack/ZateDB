@@ -34,6 +34,7 @@ describe('loadConfig', () => {
     expect(config.authPassword).toBeNull();
     expect(config.adminToken).toBeNull();
     expect(config.shutdownHardLimitMs).toBe(10_000);
+    expect(config.maxFailedAuthAttempts).toBe(5);
   });
 
   it('falls back to the default when a numeric env value is not a number', () => {

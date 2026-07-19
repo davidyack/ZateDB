@@ -13,6 +13,8 @@ export interface ConnectionContext {
   mode: ConnectionMode;
   clientName: string | null;
   remoteAddress: string;
+  /** Consecutive failed AUTH attempts on this connection; reset to 0 on success. Backs failed-auth throttling. */
+  failedAuthCount: number;
 
   sendMessage(channel: string, message: string): void;
   sendPMessage(pattern: string, channel: string, message: string): void;

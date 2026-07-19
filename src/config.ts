@@ -12,6 +12,13 @@ export interface ServerConfig {
   maxMemoryBytes: number;
   /** Max concurrent RESP connections before new ones are refused. 0 disables. */
   maxClients: number;
+  /**
+   * Consecutive failed AUTH attempts on one connection before it's dropped,
+   * forcing a full TCP reconnect + handshake per burst of guesses. Blunts
+   * line-speed password brute force (a single connection can otherwise fire
+   * unlimited guesses back-to-back). 0 disables.
+   */
+  maxFailedAuthAttempts: number;
   /** Idle (no-traffic) timeout in ms after which a non-subscriber connection is closed. 0 disables. */
   idleTimeoutMs: number;
   /** Max declared bulk-string length the parser will accept for a single argument. */
@@ -85,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxKeys: intFromEnv(env, 'MAX_KEYS', 1_000_000),
     maxMemoryBytes: intFromEnv(env, 'MAX_MEMORY_BYTES', 384 * MiB),
     maxClients: intFromEnv(env, 'MAX_CLIENTS', 10_000),
+    maxFailedAuthAttempts: intFromEnv(env, 'MAX_FAILED_AUTH_ATTEMPTS', 5),
     idleTimeoutMs: intFromEnv(env, 'IDLE_TIMEOUT_MS', 5 * 60_000),
     maxBulkBytes: intFromEnv(env, 'MAX_BULK_BYTES', 8 * MiB),
     maxBufferBytes: intFromEnv(env, 'MAX_BUFFER_BYTES', 16 * MiB),

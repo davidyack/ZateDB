@@ -5,7 +5,12 @@
   environment — see [Deployment](./deployment.md)).
 - **`AUTH`** via `REDIS_AUTH_PASSWORD`, sent automatically by the `redis`
   client whenever `REDIS_URL` includes credentials — defense-in-depth even
-  on a private network.
+  on a private network. The password compare is timing-safe, and a
+  connection that fails `AUTH` `MAX_FAILED_AUTH_ATTEMPTS` times in a row
+  (default 5) is dropped, so a brute-force attempt pays a full TCP
+  reconnect + handshake per burst instead of firing unlimited guesses down
+  one socket at line speed. The failure reply is generic (it never hints
+  how close a guess was).
 - **The admin API token is a separate secret** from the `AUTH` password,
   independently rotatable — different blast radius. The `AUTH` password
   lets a caller read/write cache data as the app would; the admin token
