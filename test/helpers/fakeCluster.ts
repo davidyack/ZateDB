@@ -96,13 +96,45 @@ export class FakeDurableStore implements DurableStore {
 }
 
 /**
+ * Adversarial delivery policy for exercising the consistency model against
+ * the failure modes a real, best-effort transport exhibits — reorder,
+ * delay, drop, duplicate — rather than only the synchronous in-order happy
+ * path. All default off (in-order, exactly-once), so existing tests are
+ * unaffected.
+ */
+export interface DeliveryPolicy {
+  /** Deliver every event twice (at-least-once / duplicate delivery). */
+  duplicate?: boolean;
+  /** Drop delivery of matching events to the given receiver node (a missed event). */
+  drop?: (event: ReplicationEvent, toNodeId: string) => boolean;
+  /**
+   * Hold every event instead of delivering it; the test flushes them
+   * explicitly via flush()/flushReversed(), which is how out-of-order and
+   * delayed delivery are simulated deterministically (no timers, no RNG).
+   */
+  hold?: boolean;
+}
+
+/**
  * In-memory double for an Azure Service Bus topic: every transport created
  * from the same hub instance receives every other transport's publishes,
  * mirroring the real topic/one-subscription-per-node fan-out pattern (see
- * serviceBusTransport.ts) without a real Service Bus namespace.
+ * serviceBusTransport.ts) without a real Service Bus namespace. A
+ * DeliveryPolicy can make delivery adversarial (reorder/drop/duplicate) to
+ * test the documented convergence guarantees.
  */
 export class FakeReplicationHub {
   private readonly transports = new Set<FakeReplicationTransport>();
+  private policy: DeliveryPolicy = {};
+  private held: ReplicationEvent[] = [];
+
+  constructor(policy: DeliveryPolicy = {}) {
+    this.policy = policy;
+  }
+
+  setPolicy(policy: DeliveryPolicy): void {
+    this.policy = policy;
+  }
 
   createTransport(nodeId: string): FakeReplicationTransport {
     return new FakeReplicationTransport(nodeId, this);
@@ -117,7 +149,33 @@ export class FakeReplicationHub {
   }
 
   broadcast(event: ReplicationEvent): void {
-    for (const t of this.transports) t.deliver(event);
+    if (this.policy.hold) {
+      this.held.push(event);
+      return;
+    }
+    this.deliverOnce(event);
+  }
+
+  /** Flush held events in arrival order. */
+  flush(): void {
+    const pending = this.held;
+    this.held = [];
+    for (const event of pending) this.deliverOnce(event);
+  }
+
+  /** Flush held events in reverse arrival order — the simplest deterministic reordering. */
+  flushReversed(): void {
+    const pending = this.held.slice().reverse();
+    this.held = [];
+    for (const event of pending) this.deliverOnce(event);
+  }
+
+  private deliverOnce(event: ReplicationEvent): void {
+    for (const t of this.transports) {
+      if (this.policy.drop?.(event, t.getNodeId())) continue;
+      t.deliver(event);
+      if (this.policy.duplicate) t.deliver(event);
+    }
   }
 }
 
@@ -127,6 +185,10 @@ export class FakeReplicationTransport implements ReplicationTransport {
   private onFatal: ((err: Error) => void) | null = null;
 
   constructor(private readonly nodeId: string, private readonly hub: FakeReplicationHub) {}
+
+  getNodeId(): string {
+    return this.nodeId;
+  }
 
   async start(onMessage: (event: ReplicationEvent) => void, onFatal?: (err: Error) => void): Promise<void> {
     this.onMessage = onMessage;
