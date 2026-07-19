@@ -19,8 +19,7 @@ export function subscribe(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length < 1) return { frames: [wrongArgsError('subscribe')] };
   const frames: RespValue[] = [];
   for (const channel of args) {
-    ctx.pubsub.subscribeChannel(ctx.conn, channel);
-    recordSubscriptionChange('channel', 1);
+    if (ctx.pubsub.subscribeChannel(ctx.conn, channel)) recordSubscriptionChange('channel', 1);
     ctx.conn.mode = 'subscriber';
     frames.push(confirmation('subscribe', channel, ctx.conn.totalSubscriptions()));
   }
@@ -31,8 +30,7 @@ export function psubscribe(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length < 1) return { frames: [wrongArgsError('psubscribe')] };
   const frames: RespValue[] = [];
   for (const pattern of args) {
-    ctx.pubsub.subscribePattern(ctx.conn, pattern);
-    recordSubscriptionChange('pattern', 1);
+    if (ctx.pubsub.subscribePattern(ctx.conn, pattern)) recordSubscriptionChange('pattern', 1);
     ctx.conn.mode = 'subscriber';
     frames.push(confirmation('psubscribe', pattern, ctx.conn.totalSubscriptions()));
   }
@@ -46,8 +44,7 @@ export function unsubscribe(ctx: CommandContext, args: string[]): CommandResult 
     frames.push(confirmation('unsubscribe', null, ctx.conn.totalSubscriptions()));
   } else {
     for (const channel of channels) {
-      ctx.pubsub.unsubscribeChannel(ctx.conn, channel);
-      recordSubscriptionChange('channel', -1);
+      if (ctx.pubsub.unsubscribeChannel(ctx.conn, channel)) recordSubscriptionChange('channel', -1);
       frames.push(confirmation('unsubscribe', channel, ctx.conn.totalSubscriptions()));
     }
   }
@@ -62,8 +59,7 @@ export function punsubscribe(ctx: CommandContext, args: string[]): CommandResult
     frames.push(confirmation('punsubscribe', null, ctx.conn.totalSubscriptions()));
   } else {
     for (const pattern of patterns) {
-      ctx.pubsub.unsubscribePattern(ctx.conn, pattern);
-      recordSubscriptionChange('pattern', -1);
+      if (ctx.pubsub.unsubscribePattern(ctx.conn, pattern)) recordSubscriptionChange('pattern', -1);
       frames.push(confirmation('punsubscribe', pattern, ctx.conn.totalSubscriptions()));
     }
   }

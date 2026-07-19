@@ -36,42 +36,48 @@ export class PubSubRegistry {
   private subscriberChannels = new Map<string, Set<string>>();
   private subscriberPatterns = new Map<string, Set<string>>();
 
-  subscribeChannel(sub: Subscriber, channel: string): void {
+  /** Returns true if this was a new subscription (not an already-held one). */
+  subscribeChannel(sub: Subscriber, channel: string): boolean {
     let set = this.channels.get(channel);
     if (!set) {
       set = new Set();
       this.channels.set(channel, set);
     }
+    if (set.has(sub)) return false;
     set.add(sub);
     this.trackReverse(this.subscriberChannels, sub.id, channel);
+    return true;
   }
 
-  unsubscribeChannel(sub: Subscriber, channel: string): void {
+  /** Returns true if a subscription was actually removed. */
+  unsubscribeChannel(sub: Subscriber, channel: string): boolean {
     const set = this.channels.get(channel);
-    if (set) {
-      set.delete(sub);
-      if (set.size === 0) this.channels.delete(channel);
-    }
+    const removed = set?.delete(sub) ?? false;
+    if (set && set.size === 0) this.channels.delete(channel);
     this.subscriberChannels.get(sub.id)?.delete(channel);
+    return removed;
   }
 
-  subscribePattern(sub: Subscriber, pattern: string): void {
+  /** Returns true if this was a new subscription (not an already-held one). */
+  subscribePattern(sub: Subscriber, pattern: string): boolean {
     let entry = this.patterns.get(pattern);
     if (!entry) {
       entry = { regex: globToRegExp(pattern), subscribers: new Set() };
       this.patterns.set(pattern, entry);
     }
+    if (entry.subscribers.has(sub)) return false;
     entry.subscribers.add(sub);
     this.trackReverse(this.subscriberPatterns, sub.id, pattern);
+    return true;
   }
 
-  unsubscribePattern(sub: Subscriber, pattern: string): void {
+  /** Returns true if a subscription was actually removed. */
+  unsubscribePattern(sub: Subscriber, pattern: string): boolean {
     const entry = this.patterns.get(pattern);
-    if (entry) {
-      entry.subscribers.delete(sub);
-      if (entry.subscribers.size === 0) this.patterns.delete(pattern);
-    }
+    const removed = entry?.subscribers.delete(sub) ?? false;
+    if (entry && entry.subscribers.size === 0) this.patterns.delete(pattern);
     this.subscriberPatterns.get(sub.id)?.delete(pattern);
+    return removed;
   }
 
   /** Removes a subscriber from every channel/pattern it holds. Call on disconnect. */

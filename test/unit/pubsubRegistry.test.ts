@@ -102,6 +102,26 @@ describe('PubSubRegistry', () => {
     expect(sub.pmessages.map((m) => m[1])).toEqual(['room:1', 'room:2']);
   });
 
+  it('reports whether a (un)subscribe actually changed membership, so the metric only moves on real changes', () => {
+    // Regression: the active-subscriptions gauge used to be incremented on
+    // every SUBSCRIBE and decremented on every UNSUBSCRIBE regardless of
+    // whether membership changed, so a duplicate SUBSCRIBE or a spurious
+    // UNSUBSCRIBE drifted the gauge away from the true count.
+    const registry = new PubSubRegistry();
+    const sub = fakeSubscriber('a');
+
+    expect(registry.subscribeChannel(sub, 'room:1')).toBe(true);
+    expect(registry.subscribeChannel(sub, 'room:1')).toBe(false); // already subscribed
+    expect(registry.unsubscribeChannel(sub, 'room:1')).toBe(true);
+    expect(registry.unsubscribeChannel(sub, 'room:1')).toBe(false); // not subscribed
+    expect(registry.unsubscribeChannel(sub, 'never-subscribed')).toBe(false);
+
+    expect(registry.subscribePattern(sub, 'room:*')).toBe(true);
+    expect(registry.subscribePattern(sub, 'room:*')).toBe(false);
+    expect(registry.unsubscribePattern(sub, 'room:*')).toBe(true);
+    expect(registry.unsubscribePattern(sub, 'room:*')).toBe(false);
+  });
+
   it('reports topology for the admin pubsub endpoint', () => {
     const registry = new PubSubRegistry();
     const a = fakeSubscriber('a');
