@@ -31,3 +31,7 @@ export function subscriberModeError(command: string): RespValue {
 export function notAnIntegerReplyError(): RespValue {
   return error('ERR value is not an integer or out of range');
 }
+
+export function invalidExpireTimeError(command: string): RespValue {
+  return error(`ERR invalid expire time in '${command.toLowerCase()}' command`);
+}

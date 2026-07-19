@@ -3,10 +3,17 @@ import { NotAnIntegerError, WrongTypeError } from '../store/types.js';
 import type { ExpireFlag } from '../store/store.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
-import { notAnIntegerReplyError, wrongArgsError } from './errors.js';
+import { invalidExpireTimeError, notAnIntegerReplyError, wrongArgsError } from './errors.js';
 import { error } from '../resp/types.js';
 
 const EXPIRE_FLAGS: ReadonlySet<string> = new Set(['NX', 'XX', 'GT', 'LT']);
+
+/** Strict Redis-style integer parse: rejects '', floats, and non-numeric text. */
+function parseIntStrict(raw: string): number | null {
+  if (!/^[+-]?\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
 
 function parseExpireFlag(raw: string | undefined): ExpireFlag | undefined {
   if (raw === undefined) return undefined;
@@ -31,10 +38,16 @@ export function set(ctx: CommandContext, args: string[]): CommandResult {
 
   for (let i = 0; i < rest.length; i++) {
     const opt = rest[i].toUpperCase();
-    if (opt === 'EX' && i + 1 < rest.length) {
-      exSeconds = Number(rest[++i]);
-    } else if (opt === 'PX' && i + 1 < rest.length) {
-      pxMs = Number(rest[++i]);
+    if (opt === 'EX' || opt === 'PX') {
+      // A bad expiry value must be rejected, not silently coerced to NaN —
+      // NaN produces a key whose expiry check never fires, i.e. one that
+      // never expires. Mirror real Redis's two distinct errors.
+      const parsed = parseIntStrict(rest[i + 1] ?? '');
+      if (parsed === null) return result(notAnIntegerReplyError());
+      if (parsed <= 0) return result(invalidExpireTimeError('set'));
+      if (opt === 'EX') exSeconds = parsed;
+      else pxMs = parsed;
+      i++;
     } else {
       // NX/XX/GET/KEEPTTL and anything else unrecognized: no current caller
       // sends these, so accept and ignore rather than erroring the connection.
