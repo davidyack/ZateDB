@@ -1,9 +1,9 @@
 import { bulk, integer, OK } from '../resp/types.js';
-import { NotAnIntegerError, WrongTypeError } from '../store/types.js';
+import { NotAnIntegerError, OutOfMemoryError, WrongTypeError } from '../store/types.js';
 import type { ExpireFlag } from '../store/store.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
-import { invalidExpireTimeError, notAnIntegerReplyError, wrongArgsError } from './errors.js';
+import { invalidExpireTimeError, notAnIntegerReplyError, unsupportedOptionError, wrongArgsError } from './errors.js';
 import { error } from '../resp/types.js';
 
 const EXPIRE_FLAGS: ReadonlySet<string> = new Set(['NX', 'XX', 'GT', 'LT']);
@@ -49,8 +49,11 @@ export function set(ctx: CommandContext, args: string[]): CommandResult {
       else pxMs = parsed;
       i++;
     } else {
-      // NX/XX/GET/KEEPTTL and anything else unrecognized: no current caller
-      // sends these, so accept and ignore rather than erroring the connection.
+      // NX/XX/GET/KEEPTTL and anything else are not implemented. Erroring
+      // loudly (rather than accepting-and-ignoring) is the point: a silently
+      // dropped `SET NX` hands a lock/idempotency caller success semantics it
+      // never actually got. Better to break at integration time than in prod.
+      return result(unsupportedOptionError('set', rest[i]));
     }
   }
 
@@ -79,8 +82,10 @@ export function incr(ctx: CommandContext, args: string[]): CommandResult {
 export function expire(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length < 2) return result(wrongArgsError('expire'));
   const [key, secondsRaw, flag] = args;
-  const seconds = Number(secondsRaw);
-  if (!Number.isFinite(seconds)) return result(notAnIntegerReplyError());
+  // Real Redis EXPIRE takes an integer; a float would previously slip through
+  // Number()/isFinite and be applied as a fractional-second TTL.
+  const seconds = parseIntStrict(secondsRaw);
+  if (seconds === null) return result(notAnIntegerReplyError());
   const ok = ctx.store.expire(key, seconds, parseExpireFlag(flag));
   return result(integer(ok ? 1 : 0));
 }
@@ -88,8 +93,8 @@ export function expire(ctx: CommandContext, args: string[]): CommandResult {
 export function pexpire(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length < 2) return result(wrongArgsError('pexpire'));
   const [key, msRaw, flag] = args;
-  const ms = Number(msRaw);
-  if (!Number.isFinite(ms)) return result(notAnIntegerReplyError());
+  const ms = parseIntStrict(msRaw);
+  if (ms === null) return result(notAnIntegerReplyError());
   const ok = ctx.store.pexpire(key, ms, parseExpireFlag(flag));
   return result(integer(ok ? 1 : 0));
 }
@@ -97,5 +102,6 @@ export function pexpire(ctx: CommandContext, args: string[]): CommandResult {
 function toRespError(e: unknown) {
   if (e instanceof WrongTypeError) return error(e.message);
   if (e instanceof NotAnIntegerError) return error(e.message);
+  if (e instanceof OutOfMemoryError) return error(e.message);
   throw e;
 }

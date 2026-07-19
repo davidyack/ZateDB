@@ -35,3 +35,16 @@ export function notAnIntegerReplyError(): RespValue {
 export function invalidExpireTimeError(command: string): RespValue {
   return error(`ERR invalid expire time in '${command.toLowerCase()}' command`);
 }
+
+/**
+ * A known command received an option this façade does not implement. The
+ * project's rule is to be *loudly* incomplete: a silently-ignored `SET NX`
+ * would hand a rate-limiter or lock the wrong semantics with no signal.
+ */
+export function unsupportedOptionError(command: string, option: string): RespValue {
+  return error(`ERR unsupported option '${option}' for '${command.toLowerCase()}' command`);
+}
+
+export function maxClientsError(): RespValue {
+  return error('ERR max number of clients reached');
+}

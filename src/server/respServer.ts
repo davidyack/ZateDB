@@ -3,6 +3,8 @@ import { Connection } from './connection.js';
 import type { Store } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { ServerConfig } from '../config.js';
+import { serialize } from '../resp/serializer.js';
+import { error as respError } from '../resp/types.js';
 import { logger } from '../logger.js';
 
 export class RespServer {
@@ -32,6 +34,15 @@ export class RespServer {
 
   private onConnect(socket: Socket): void {
     if (!this.accepting) {
+      socket.destroy();
+      return;
+    }
+    // Cap concurrent connections so a connection/FD leak in a consuming app (or
+    // a scan on the internal network) can't accumulate sockets until the
+    // process runs out of file descriptors.
+    if (this.config.maxClients > 0 && this.connections.size >= this.config.maxClients) {
+      logger.warn('resp.max_clients_reached', { maxClients: this.config.maxClients });
+      socket.write(serialize(respError('ERR max number of clients reached')));
       socket.destroy();
       return;
     }

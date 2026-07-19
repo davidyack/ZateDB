@@ -1,5 +1,5 @@
 import { error, integer } from '../resp/types.js';
-import { WrongTypeError } from '../store/types.js';
+import { OutOfMemoryError, WrongTypeError } from '../store/types.js';
 import { InvalidScoreRangeError, parseScoreBound } from '../store/scoreRange.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
@@ -17,7 +17,7 @@ export function zadd(ctx: CommandContext, args: string[]): CommandResult {
   try {
     return result(integer(ctx.store.zadd(key, pairs)));
   } catch (e) {
-    if (e instanceof WrongTypeError) return result(error(e.message));
+    if (e instanceof WrongTypeError || e instanceof OutOfMemoryError) return result(error(e.message));
     throw e;
   }
 }

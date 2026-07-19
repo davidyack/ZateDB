@@ -32,3 +32,10 @@ export class NotAnIntegerError extends Error {
     super('ERR value is not an integer or out of range');
   }
 }
+
+/** Raised when a write would exceed the configured key/memory ceiling. Mirrors Redis's maxmemory rejection. */
+export class OutOfMemoryError extends Error {
+  constructor() {
+    super("OOM command not allowed when used memory > 'maxmemory'.");
+  }
+}

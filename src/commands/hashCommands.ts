@@ -1,5 +1,5 @@
 import { array, bulk, error, integer } from '../resp/types.js';
-import { WrongTypeError } from '../store/types.js';
+import { OutOfMemoryError, WrongTypeError } from '../store/types.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
 import { wrongArgsError } from './errors.js';
@@ -12,7 +12,7 @@ export function hset(ctx: CommandContext, args: string[]): CommandResult {
   try {
     return result(integer(ctx.store.hset(key, pairs)));
   } catch (e) {
-    if (e instanceof WrongTypeError) return result(error(e.message));
+    if (e instanceof WrongTypeError || e instanceof OutOfMemoryError) return result(error(e.message));
     throw e;
   }
 }
