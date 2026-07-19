@@ -48,6 +48,25 @@ describe('RespRequestParser', () => {
     const commands = parser.feed(Buffer.from(`*2\r\n$3\r\nGET\r\n$${Buffer.byteLength(value)}\r\n${value}\r\n`));
     expect(commands).toEqual([['GET', value]]);
   });
+
+  it('rejects a declared bulk length over the configured cap without buffering it', () => {
+    const parser = new RespRequestParser({ maxBulkBytes: 16 });
+    // Header alone declares 1 GiB; the parser must reject on the header, not
+    // wait to buffer the payload.
+    expect(() => parser.feed(Buffer.from('*1\r\n$1073741824\r\n'))).toThrow(/bulk length exceeds limit/);
+  });
+
+  it('rejects when pending unparsed bytes exceed the buffer cap', () => {
+    const parser = new RespRequestParser({ maxBufferBytes: 32 });
+    // An array header promising a bulk that never arrives; bytes accumulate.
+    const partial = Buffer.concat([Buffer.from('*2\r\n$3\r\nGET\r\n$50\r\n'), Buffer.alloc(40, 0x61)]);
+    expect(() => parser.feed(partial)).toThrow(/request buffer exceeds limit/);
+  });
+
+  it('still accepts frames under the caps', () => {
+    const parser = new RespRequestParser({ maxBulkBytes: 1024, maxBufferBytes: 4096 });
+    expect(parser.feed(Buffer.from('*1\r\n$4\r\nPING\r\n'))).toEqual([['PING']]);
+  });
 });
 
 describe('serialize', () => {

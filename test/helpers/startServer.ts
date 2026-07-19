@@ -24,6 +24,13 @@ export async function startTestServer(overrides: Partial<ServerConfig> = {}): Pr
     authPassword: null,
     adminToken: null,
     ttlSweepIntervalMs: 0,
+    maxKeys: 0,
+    maxMemoryBytes: 0,
+    maxClients: 0,
+    idleTimeoutMs: 0,
+    maxBulkBytes: 0,
+    maxBufferBytes: 0,
+    outboundHighWaterMarkBytes: 0,
     otelServiceName: 'backendcache-test',
     appInsightsConnectionString: null,
     otlpTraceEndpoint: null,
@@ -31,7 +38,10 @@ export async function startTestServer(overrides: Partial<ServerConfig> = {}): Pr
     ...overrides,
   };
 
-  const store = new Store(config.ttlSweepIntervalMs);
+  const store = new Store(config.ttlSweepIntervalMs, {
+    maxKeys: config.maxKeys,
+    maxMemoryBytes: config.maxMemoryBytes,
+  });
   const pubsub = new PubSubRegistry();
   const respServer = new RespServer(store, pubsub, config);
   await respServer.listen(0);

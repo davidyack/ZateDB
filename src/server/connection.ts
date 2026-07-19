@@ -32,13 +32,30 @@ export class Connection implements ConnectionContext {
   clientName: string | null = null;
   readonly remoteAddress: string;
 
-  private parser = new RespRequestParser();
+  private parser: RespRequestParser;
   private closed = false;
 
   constructor(private readonly socket: Socket, private readonly deps: ConnectionDeps) {
     this.remoteAddress = `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 0}`;
     this.mode = 'command';
+    this.parser = new RespRequestParser({
+      maxBulkBytes: deps.config.maxBulkBytes,
+      maxBufferBytes: deps.config.maxBufferBytes,
+    });
     recordConnectionOpened();
+
+    // Reap idle connections so a leaked/abandoned socket can't accumulate
+    // forever. Subscribers legitimately sit idle waiting for messages, so they
+    // are exempt (checked at fire time, since mode changes after connect).
+    if (deps.config.idleTimeoutMs > 0) {
+      socket.setTimeout(deps.config.idleTimeoutMs);
+      socket.on('timeout', () => {
+        if (this.mode !== 'subscriber') {
+          logger.debug('connection.idle_timeout', { connectionId: this.id, remoteAddress: this.remoteAddress });
+          this.socket.end();
+        }
+      });
+    }
 
     socket.on('data', (chunk) => this.onData(chunk));
     socket.on('error', (err) => this.onError(err));
@@ -55,7 +72,15 @@ export class Connection implements ConnectionContext {
         this.socket.end();
         return;
       }
-      throw err;
+      // Any other parser fault is a bug, but it must not take the whole server
+      // down as an uncaught 'data'-handler exception — kill just this socket.
+      logger.error('connection.parser_error', {
+        connectionId: this.id,
+        remoteAddress: this.remoteAddress,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.socket.destroy();
+      return;
     }
 
     for (const rawArgs of commands) {
@@ -81,7 +106,21 @@ export class Connection implements ConnectionContext {
   }
 
   private write(frame: Parameters<typeof serialize>[0]): void {
-    if (this.socket.writable) this.socket.write(serialize(frame));
+    if (!this.socket.writable) return;
+    this.socket.write(serialize(frame));
+    // Slow-consumer guard: a stalled subscriber makes PUBLISH fan-out pile up
+    // in Node's outbound buffer unboundedly (Redis calls this
+    // client-output-buffer-limit). Drop the connection once its backlog crosses
+    // the high-water mark rather than let one slow client OOM the server.
+    const hwm = this.deps.config.outboundHighWaterMarkBytes;
+    if (hwm > 0 && this.socket.writableLength > hwm) {
+      logger.warn('connection.outbound_buffer_exceeded', {
+        connectionId: this.id,
+        remoteAddress: this.remoteAddress,
+        writableLength: this.socket.writableLength,
+      });
+      this.socket.destroy();
+    }
   }
 
   private onError(err: Error): void {
