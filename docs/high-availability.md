@@ -101,6 +101,39 @@ distributed-consensus one. Concretely:
   to Cosmos DB — that's the whole point of the in-memory hot copy. A key
   written on another node is visible locally once its replication event
   arrives, not before.
+- **A hash/sorted-set is replicated as a whole snapshot, not per-field.**
+  `HSET`/`HDEL`/`ZADD`/`ZREMRANGEBYSCORE` ship the entire post-mutation
+  entry (every field, every member), not just the changed field. Two
+  nodes concurrently setting *different* fields of the *same* presence
+  hash within one replication window (`HSET presence:room1 user1 online`
+  on node A, `HSET presence:room1 user2 online` on node B) converge on
+  whichever full snapshot lands last — the other node's field update is
+  silently lost, not merged. This is a real, stronger failure mode than
+  the `INCR` counter race above (a lost field, not just a stale count);
+  avoid concurrent writes to *different* fields of the same presence/set
+  key from different nodes if that matters for a given use case.
+- **A no-op never replicates.** `EXPIRE`/`PEXPIRE`/`HDEL`/
+  `ZREMRANGEBYSCORE`/`DEL` against a key this node doesn't currently hold
+  locally ship nothing at all — the dispatcher checks whether the key
+  existed before *and* after the command, and only replicates when
+  something actually changed here. Without this, a command that's a
+  genuine no-op on this node (because the key was created on another node
+  moments ago and hasn't replicated in yet) would otherwise broadcast a
+  phantom "this key is deleted," destroying a real value elsewhere in the
+  cluster.
+- **Same-node writes to the same key replicate in order.** Two rapid
+  `SET`s on the same key from the same client are chained (not run
+  concurrently) through the replication pipeline, so the cluster always
+  converges on whichever write happened last locally — not whichever
+  network round trip happened to finish first. This doesn't extend across
+  nodes: two *different* nodes writing the same key concurrently still
+  race, per the `INCR` bullet above.
+- **A newly-joining node's snapshot never overwrites a write that landed
+  during hydration.** Incoming replication events are buffered (not
+  applied) while a node loads its startup snapshot from Cosmos DB, then
+  replayed afterward — so a write from another node that arrives mid-hydration
+  always wins over the (necessarily slightly older) snapshot, rather than
+  being silently reverted once hydration finishes applying it.
 - **No read-after-write guarantee across nodes.** A client that writes on
   node A and immediately reads on node B (e.g. a load balancer that
   doesn't pin connections) can observe a brief staleness window.
@@ -135,6 +168,16 @@ closed to the well-understood single-node behavior.
 
 ## Operational notes
 
+- **Startup fails fast, it doesn't hang**: connecting to Cosmos DB/Service
+  Bus and hydrating are both bounded by `CLUSTER_STARTUP_TIMEOUT_MS`
+  (default 30s — see [Deployment](./deployment.md)). If either is
+  configured but unreachable, the process exits rather than sitting
+  "alive but never ready" indefinitely — a stuck replica with a
+  permanently-failing readiness probe is a worse failure mode than a
+  crash-loop Container Apps' restart policy can retry with backoff. This
+  is also why a partially-configured environment (Cosmos DB set, Service
+  Bus not, or vice versa) falls back to standalone instead of half-running
+  HA — see [Standalone mode](#standalone-mode) above.
 - **Service Bus permissions**: each node creates its own subscription on
   the shared replication topic at startup (named after its node id) and
   deletes it on graceful shutdown; a node that dies without deregistering

@@ -203,6 +203,63 @@ describe('ClusterCoordinator HA mode: cross-node convergence', () => {
     storeC.close();
   });
 
+  it("a live write that arrives mid-hydration is not clobbered by the (necessarily slightly stale) hydration snapshot", async () => {
+    // Regression: the replication transport used to start delivering live
+    // events immediately, while hydrate()'s durable.loadAll() snapshot
+    // could still be in flight. If a live event for a key arrived and was
+    // applied before hydrate()'s loop got to that same key, hydrate()
+    // would unconditionally overwrite it back to the stale pre-hydration
+    // value once it (eventually) ran.
+    durable.keys.set('counter', { type: 'string', value: '1', expiresAtMs: null });
+
+    const storeC = new Store(0);
+    const pubsubC = new PubSubRegistry();
+    const originalLoadAll = durable.loadAll.bind(durable);
+    let releaseLoadAll!: () => void;
+    const loadAllGate = new Promise<void>((resolve) => {
+      releaseLoadAll = resolve;
+    });
+    durable.loadAll = async () => {
+      await loadAllGate; // hold hydration open until the test releases it
+      return originalLoadAll();
+    };
+
+    const clusterC = new ClusterCoordinator({
+      store: storeC,
+      pubsub: pubsubC,
+      durable,
+      transport: hub.createTransport('node-c'),
+      nodeId: 'node-c',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+
+    // clusterC.start() registers its transport with the hub synchronously
+    // (before its first await), so node C is already subscribed and ready
+    // to buffer by the time this call returns — hydration itself is now
+    // blocked on loadAllGate.
+    const startPromise = clusterC.start();
+
+    // A newer write happens on node A while node C's hydration is stuck.
+    storeA.set('counter', '2');
+    clusterA.publishKeyChange('counter');
+    await waitFor(() => {
+      const entry = durable.keys.get('counter');
+      return entry?.type === 'string' && entry.value === '2';
+    });
+
+    releaseLoadAll();
+    await startPromise;
+
+    expect(storeC.get('counter')).toBe('2'); // the live write wins, not the stale snapshot
+
+    await clusterC.stop();
+    storeC.close();
+  });
+
   it('reports both nodes in clusterSnapshot once each has heartbeat at least once', async () => {
     // heartbeatIntervalMs is 10s in these tests; start() fires one heartbeat immediately.
     await waitFor(() => durable.nodes.size === 2);

@@ -13,10 +13,17 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --omit=optional && npm cache clean --force
 # Optional OpenTelemetry exporter and Azure HA (Cosmos DB / Service Bus)
 # deps are best-effort — install them but don't fail the image build if
-# the registry resolution has issues. Without them the process still
-# starts, in standalone (single-node) mode for the HA deps or with
-# telemetry degraded to a no-op provider — see cluster/factory.ts and
-# telemetry/otel.ts.
+# the registry resolution has issues. Their absence at runtime is handled
+# very differently depending on whether HA is actually configured:
+#   - No COSMOS_*/SERVICE_BUS_* env vars set: the process runs standalone
+#     (single-node, in-memory-only) and never needs these packages at all.
+#   - COSMOS_*/SERVICE_BUS_* env vars ARE set but the packages failed to
+#     install here: the process fails fast at startup (see index.ts's
+#     withTimeout + createClusterCoordinator's dynamic import) rather than
+#     silently downgrading to standalone — an operator who configured HA
+#     needs to know it isn't actually running, not have it look healthy
+#     while quietly losing the durability/sync guarantee.
+# Telemetry alone degrades to a no-op provider either way — see telemetry/otel.ts.
 RUN npm install --omit=dev \
     @azure/cosmos \
     @azure/identity \

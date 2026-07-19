@@ -5,7 +5,7 @@ import type { ReplicationTransport } from './replicationTransport.js';
 import type { NodeSnapshot, ReplicationEvent } from './types.js';
 import { entryToSnapshot, snapshotToEntry } from './snapshot.js';
 import { redactKey } from '../telemetry/commandTelemetry.js';
-import { logger } from '../logger.js';
+import { errorMessage, logger } from '../logger.js';
 
 export interface ClusterCoordinatorDeps {
   store: Store;
@@ -51,6 +51,7 @@ export class ClusterCoordinator {
   private seq = 0;
   private hydratedFlag = false;
   private inFlight = new Set<Promise<unknown>>();
+  private lastPublishByKey = new Map<string, Promise<void>>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly deps: ClusterCoordinatorDeps) {
@@ -68,12 +69,27 @@ export class ClusterCoordinator {
       return;
     }
 
-    await this.deps.transport.start((event) => this.applyRemoteEvent(event));
-    await this.hydrate();
+    // The transport starts delivering live events immediately, but
+    // hydrate() below reads a point-in-time snapshot from the durable
+    // store that can already be stale by the time it resolves. Applying
+    // that snapshot after a live event for the same key would silently
+    // revert it. So incoming events are buffered (not applied) until
+    // hydration finishes, then replayed — live writes always land after
+    // the snapshot, never before it.
+    let hydrating = true;
+    const buffered: ReplicationEvent[] = [];
+    await this.deps.transport.start((event) => {
+      if (hydrating) buffered.push(event);
+      else this.applyRemoteEvent(event);
+    });
 
-    this.heartbeatTimer = setInterval(() => void this.heartbeat(), this.deps.heartbeatIntervalMs);
+    await this.hydrate();
+    hydrating = false;
+    for (const event of buffered) this.applyRemoteEvent(event);
+
+    this.heartbeatTimer = setInterval(() => this.track(this.heartbeat()), this.deps.heartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
-    void this.heartbeat();
+    this.track(this.heartbeat());
   }
 
   private async hydrate(): Promise<void> {
@@ -89,26 +105,40 @@ export class ClusterCoordinator {
    * Call after a mutating command (SET/INCR/EXPIRE/PEXPIRE/HSET/HDEL/
    * ZADD/ZREMRANGEBYSCORE/DEL) has already been applied to the local
    * store. Reads the resulting state back and ships it out — an entry
-   * that no longer exists is replicated as a delete.
+   * that no longer exists is replicated as a delete. Publishes for the
+   * same key are chained in call order (not run concurrently): otherwise
+   * two independent fire-and-forget network round trips for e.g. two
+   * rapid SETs on the same key could complete out of order and leave the
+   * cluster converged on the older value.
    */
   publishKeyChange(key: string): void {
     if (!this.haEnabled) return;
     const entry = this.deps.store.getRawEntry(key);
-    this.track(
+    const prior = this.lastPublishByKey.get(key) ?? Promise.resolve();
+    const task = prior.then(() =>
       this.doPublishKeyChange(key, entry).catch((err) => {
         logger.warn('cluster.replicate_failed', { key: redactKey(key), error: errorMessage(err) });
       }),
     );
+    this.lastPublishByKey.set(key, task);
+    void task.finally(() => {
+      if (this.lastPublishByKey.get(key) === task) this.lastPublishByKey.delete(key);
+    });
+    this.track(task);
   }
 
   private async doPublishKeyChange(key: string, entry: ReturnType<Store['getRawEntry']>): Promise<void> {
+    // The Cosmos DB write and the Service Bus broadcast are independent —
+    // peers apply the broadcast event directly, they don't read it back
+    // from Cosmos — so they run concurrently rather than back-to-back.
     if (entry === undefined) {
-      await this.deps.durable.deleteKey(key);
-      await this.deps.transport.publish(this.makeEvent({ kind: 'delete', key }));
+      await Promise.all([this.deps.durable.deleteKey(key), this.deps.transport.publish(this.makeEvent({ kind: 'delete', key }))]);
     } else {
       const snapshot = entryToSnapshot(entry);
-      await this.deps.durable.putKey(key, snapshot);
-      await this.deps.transport.publish(this.makeEvent({ kind: 'upsert', key, entry: snapshot }));
+      await Promise.all([
+        this.deps.durable.putKey(key, snapshot),
+        this.deps.transport.publish(this.makeEvent({ kind: 'upsert', key, entry: snapshot })),
+      ]);
     }
   }
 
@@ -171,7 +201,16 @@ export class ClusterCoordinator {
     return all.filter((n) => now - n.lastHeartbeatMs <= this.deps.nodeStaleMs);
   }
 
-  /** Awaits in-flight replication work (bounded by timeoutMs) — called during graceful shutdown. */
+  /**
+   * Awaits in-flight replication work — every publish and heartbeat, not
+   * just key replication — bounded by timeoutMs. Called during graceful
+   * shutdown, before stop() deletes this node's heartbeat snapshot: an
+   * in-flight heartbeat write completing *after* that delete would
+   * silently resurrect this node in cluster admin views until it goes
+   * stale. Every tracked promise already catches its own errors (see
+   * publishKeyChange/publishMessage/heartbeat), so none of them reject —
+   * Promise.all is equivalent to allSettled here and simpler.
+   */
   async drain(timeoutMs: number): Promise<void> {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -179,7 +218,7 @@ export class ClusterCoordinator {
     }
     const pending = Array.from(this.inFlight);
     if (pending.length === 0) return;
-    await Promise.race([Promise.allSettled(pending), new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
+    await Promise.race([Promise.all(pending), new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
   }
 
   async stop(): Promise<void> {
@@ -189,8 +228,4 @@ export class ClusterCoordinator {
     await this.deps.transport.stop();
     await this.deps.durable.close();
   }
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

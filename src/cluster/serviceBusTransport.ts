@@ -1,6 +1,6 @@
 import type { ReplicationTransport } from './replicationTransport.js';
 import type { ReplicationEvent } from './types.js';
-import { logger } from '../logger.js';
+import { errorMessage, logger } from '../logger.js';
 
 export interface ServiceBusConfig {
   connectionString: string;
@@ -119,7 +119,7 @@ export class ServiceBusReplicationTransport implements ReplicationTransport {
     try {
       await this.adminClient?.deleteSubscription(this.cfg.topicName, this.subscriptionName);
     } catch (err) {
-      logger.warn('cluster.servicebus.deregister_failed', { error: err instanceof Error ? err.message : String(err) });
+      logger.warn('cluster.servicebus.deregister_failed', { error: errorMessage(err) });
     }
   }
 }

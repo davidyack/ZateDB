@@ -1,5 +1,5 @@
 import type { ServerConfig } from '../config.js';
-import { isHaConfigured } from '../config.js';
+import { hasDurableStoreConfigured, hasReplicationTransportConfigured, isHaConfigured } from '../config.js';
 import type { Store } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
 import { ClusterCoordinator } from './clusterCoordinator.js';
@@ -31,8 +31,8 @@ export async function createClusterCoordinator(
   const nodeId = config.nodeId || resolveNodeId();
   const haEnabled = isHaConfigured(config);
 
-  const hasDurableStore = Boolean(config.cosmosConnectionString || config.cosmosEndpoint);
-  const hasTransport = Boolean(config.serviceBusConnectionString);
+  const hasDurableStore = hasDurableStoreConfigured(config);
+  const hasTransport = hasReplicationTransportConfigured(config);
   if (hasDurableStore !== hasTransport) {
     logger.warn('cluster.partial_configuration', {
       hint: 'Cosmos DB and Service Bus must both be configured to run in HA mode; falling back to standalone (single-node) mode',

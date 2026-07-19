@@ -29,6 +29,7 @@ See [High availability](./high-availability.md) for the architecture these enabl
 | `COSMOS_NODES_CONTAINER` | `nodes` | Container for node heartbeat/topology snapshots, partitioned on `/nodeId` — must already exist |
 | `HEARTBEAT_INTERVAL_MS` | `10000` | How often each node writes its stats/topology snapshot to Cosmos DB |
 | `NODE_STALE_MS` | `30000` | A peer node's heartbeat older than this is dropped from cluster admin views |
+| `CLUSTER_STARTUP_TIMEOUT_MS` | `30000` | Maximum time connecting to Cosmos DB/Service Bus and hydrating may take before the process exits and lets Container Apps' restart policy retry — a stuck startup fails fast rather than leaving a replica alive but permanently not-ready |
 
 A consuming application points its `REDIS_URL` at BackendCache exactly as
 it would at real Redis — e.g. `redis://:<password>@backendcache:6379` —

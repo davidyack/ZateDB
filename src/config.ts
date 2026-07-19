@@ -27,6 +27,8 @@ export interface ServerConfig {
   heartbeatIntervalMs: number;
   /** A peer node's heartbeat older than this is treated as dead and dropped from cluster admin views. */
   nodeStaleMs: number;
+  /** How long startup (Cosmos DB / Service Bus connect + hydration) may take before failing fast instead of hanging indefinitely. */
+  clusterStartupTimeoutMs: number;
 }
 
 function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -59,12 +61,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     cosmosNodesContainer: env.COSMOS_NODES_CONTAINER || 'nodes',
     heartbeatIntervalMs: intFromEnv(env, 'HEARTBEAT_INTERVAL_MS', 10_000),
     nodeStaleMs: intFromEnv(env, 'NODE_STALE_MS', 30_000),
+    clusterStartupTimeoutMs: intFromEnv(env, 'CLUSTER_STARTUP_TIMEOUT_MS', 30_000),
   };
+}
+
+export function hasDurableStoreConfigured(config: ServerConfig): boolean {
+  return Boolean(config.cosmosConnectionString || config.cosmosEndpoint);
+}
+
+export function hasReplicationTransportConfigured(config: ServerConfig): boolean {
+  return Boolean(config.serviceBusConnectionString);
 }
 
 /** HA (multi-node) mode requires both a durable store and a replication transport to be configured. */
 export function isHaConfigured(config: ServerConfig): boolean {
-  const hasDurableStore = Boolean(config.cosmosConnectionString || config.cosmosEndpoint);
-  const hasTransport = Boolean(config.serviceBusConnectionString);
-  return hasDurableStore && hasTransport;
+  return hasDurableStoreConfigured(config) && hasReplicationTransportConfigured(config);
 }

@@ -19,3 +19,8 @@ export const logger = {
     if (process.env.LOG_LEVEL === 'debug') emit('debug', message, fields);
   },
 };
+
+/** Extracts a loggable message from a caught value of unknown shape. */
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}

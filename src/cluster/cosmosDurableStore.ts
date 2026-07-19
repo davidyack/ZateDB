@@ -1,6 +1,6 @@
 import type { DurableStore } from './durableStore.js';
 import type { EntrySnapshot, NodeSnapshot } from './types.js';
-import { logger } from '../logger.js';
+import { errorMessage, logger } from '../logger.js';
 
 export interface CosmosConfig {
   /** Full account connection string (key-based auth). Takes precedence over endpoint+AAD. */
@@ -144,7 +144,7 @@ export class CosmosDurableStore implements DurableStore {
     try {
       await this.nodesContainer.item(toDocId(nodeId), nodeId).delete();
     } catch (err) {
-      if (!isNotFound(err)) logger.warn('cluster.cosmos.delete_node_snapshot_failed', { nodeId, error: String(err) });
+      if (!isNotFound(err)) logger.warn('cluster.cosmos.delete_node_snapshot_failed', { nodeId, error: errorMessage(err) });
     }
   }
 

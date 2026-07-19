@@ -275,14 +275,6 @@ export class Store {
     return this.getLive(key);
   }
 
-  /** All live (non-expired) key/entry pairs — used for admin listing and full-state hand-offs. */
-  *allEntries(): IterableIterator<[string, Entry]> {
-    const now = Date.now();
-    for (const [key, entry] of this.data) {
-      if (!this.isExpired(entry, now)) yield [key, entry];
-    }
-  }
-
   /**
    * Overwrites a key with an absolute entry snapshot — used both to
    * hydrate from the durable store at startup and to apply a mutation
