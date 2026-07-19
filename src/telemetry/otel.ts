@@ -87,11 +87,7 @@ async function buildMetricReader(config: ServerConfig) {
   if (config.appInsightsConnectionString) {
     const { AzureMonitorMetricExporter } = await import('@azure/monitor-opentelemetry-exporter');
     return new PeriodicExportingMetricReader({
-      // See the cast note above sdk.start() — nested @opentelemetry/sdk-metrics
-      // version skew between this package and the top-level one.
-      exporter: new AzureMonitorMetricExporter({
-        connectionString: config.appInsightsConnectionString,
-      }) as unknown as ConstructorParameters<typeof PeriodicExportingMetricReader>[0]['exporter'],
+      exporter: new AzureMonitorMetricExporter({ connectionString: config.appInsightsConnectionString }),
       exportIntervalMillis: 30000,
     });
   }
