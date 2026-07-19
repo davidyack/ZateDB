@@ -27,7 +27,8 @@ See [High availability](./high-availability.md) for the architecture these enabl
 | Env var | Default | Purpose |
 |---|---|---|
 | `NODE_ID` | unset | This node's identity, used as its Service Bus subscription name and Cosmos DB heartbeat document id. Falls back to `CONTAINER_APP_REPLICA_NAME` (set automatically by Container Apps), then a random id. |
-| `SERVICE_BUS_CONNECTION_STRING` | unset | Enables Service Bus-based cross-node replication. The Shared Access Policy needs **Manage** rights — each node creates/deletes its own subscription dynamically. |
+| `SERVICE_BUS_CONNECTION_STRING` | unset | Enables Service Bus-based cross-node replication via a SAS connection string. The policy needs **Manage** rights — each node creates/deletes its own subscription dynamically. Prefer managed identity (below) in production. |
+| `SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE` | unset | Service Bus namespace host (e.g. `my-ns.servicebus.windows.net`) for managed-identity (AAD) auth, used when no connection string is set. The identity needs a role allowing topic manage + send/receive. Also accepts `SERVICE_BUS_NAMESPACE`. |
 | `SERVICE_BUS_TOPIC_NAME` | `backendcache-replication` | Shared topic every node publishes to and subscribes from |
 | `COSMOS_CONNECTION_STRING` | unset | Cosmos DB key-based auth. Takes precedence over `COSMOS_ENDPOINT`. |
 | `COSMOS_ENDPOINT` | unset | Cosmos DB account endpoint, for managed-identity (AAD) auth when no connection string is set |

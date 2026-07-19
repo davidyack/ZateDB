@@ -71,7 +71,8 @@ export async function createClusterCoordinator(
     });
     const { ServiceBusReplicationTransport } = await import('./serviceBusTransport.js');
     transport = new ServiceBusReplicationTransport({
-      connectionString: config.serviceBusConnectionString as string,
+      connectionString: config.serviceBusConnectionString,
+      fullyQualifiedNamespace: config.serviceBusFullyQualifiedNamespace,
       topicName: config.serviceBusTopicName,
       nodeId,
     });

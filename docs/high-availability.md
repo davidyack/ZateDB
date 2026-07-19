@@ -239,13 +239,18 @@ mode.
   is also why a partially-configured environment (Cosmos DB set, Service
   Bus not, or vice versa) falls back to standalone instead of half-running
   HA — see [Standalone mode](#standalone-mode) above.
-- **Service Bus permissions**: each node creates its own subscription on
-  the shared replication topic at startup (named after its node id) and
-  deletes it on graceful shutdown; a node that dies without deregistering
-  leaves an orphaned subscription that self-deletes after
-  `autoDeleteOnIdle` (1 hour). This requires the connection string's
-  Shared Access Policy to have **Manage** rights, not just Send/Listen —
-  see [`infra/backendcache.bicep`](../infra/backendcache.bicep).
+- **Service Bus auth & permissions**: the app prefers **managed identity**
+  (`SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE` + `DefaultAzureCredential`),
+  falling back to a connection string only when that's all that's set —
+  mirroring the Cosmos layer, so production ships no Service Bus secret.
+  Each node creates its own subscription on the shared replication topic at
+  startup (named after its node id) and deletes it on graceful shutdown; a
+  node that dies without deregistering leaves an orphaned subscription that
+  self-deletes after `autoDeleteOnIdle` (1 hour). Because nodes manage
+  their own subscriptions, the identity (or SAS policy) needs **manage**
+  rights on the topic, not just Send/Listen — scope it to the one
+  namespace/topic. Note the topic is part of the data-plane trust boundary:
+  see [Security](./security.md).
 - **Cosmos DB documents are never Lua/stored-procedure driven** — every
   operation is a plain upsert, delete, query, or Patch-API call via the
   SDK, keeping the "no embedded scripting engine" property from

@@ -35,8 +35,10 @@ export interface ServerConfig {
   // ---- cluster / high-availability -------------------------------------
   /** Stable-enough identity for this node; see cluster/nodeId.ts for the resolution order. */
   nodeId: string;
-  /** Azure Service Bus connection string. Set together with Cosmos config to run in HA (multi-node) mode. */
+  /** Azure Service Bus connection string. Set together with Cosmos config to run in HA (multi-node) mode. Takes precedence over serviceBusFullyQualifiedNamespace. */
   serviceBusConnectionString: string | null;
+  /** Service Bus fully-qualified namespace (e.g. `my-ns.servicebus.windows.net`), for managed-identity (AAD) auth when no connection string is set. */
+  serviceBusFullyQualifiedNamespace: string | null;
   serviceBusTopicName: string;
   /** Cosmos DB key-based connection string. Takes precedence over cosmosEndpoint. */
   cosmosConnectionString: string | null;
@@ -104,6 +106,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
 
     nodeId: env.NODE_ID || env.CONTAINER_APP_REPLICA_NAME || '',
     serviceBusConnectionString: env.SERVICE_BUS_CONNECTION_STRING || null,
+    serviceBusFullyQualifiedNamespace: env.SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE || env.SERVICE_BUS_NAMESPACE || null,
     serviceBusTopicName: env.SERVICE_BUS_TOPIC_NAME || 'backendcache-replication',
     cosmosConnectionString: env.COSMOS_CONNECTION_STRING || null,
     cosmosEndpoint: env.COSMOS_ENDPOINT || null,
@@ -129,7 +132,7 @@ export function hasDurableStoreConfigured(config: ServerConfig): boolean {
 }
 
 export function hasReplicationTransportConfigured(config: ServerConfig): boolean {
-  return Boolean(config.serviceBusConnectionString);
+  return Boolean(config.serviceBusConnectionString || config.serviceBusFullyQualifiedNamespace);
 }
 
 /** HA (multi-node) mode requires both a durable store and a replication transport to be configured. */

@@ -19,8 +19,11 @@ param managedEnvironmentId string
 @description('Container image, e.g. <registry>.azurecr.io/backendcache:<tag>')
 param containerImage string
 
-@description('User-assigned managed identity resource ID used to pull secrets from Key Vault')
+@description('User-assigned managed identity resource ID used to pull secrets from Key Vault and authenticate to Service Bus / Cosmos DB')
 param identityId string
+
+@description('Client (application) ID of the user-assigned managed identity above. Exported as AZURE_CLIENT_ID so DefaultAzureCredential selects this identity for Service Bus / Cosmos DB AAD auth rather than guessing among any others attached.')
+param identityClientId string
 
 @description('Key Vault secret URI for the RESP AUTH password')
 param redisAuthSecretUri string
@@ -28,11 +31,11 @@ param redisAuthSecretUri string
 @description('Key Vault secret URI for the admin API bearer token')
 param adminTokenSecretUri string
 
-@description('Key Vault secret URI for the Service Bus connection string. The referenced Shared Access Policy needs Manage rights (not just Send/Listen) — each node creates its own subscription dynamically at startup, see docs/high-availability.md.')
-param serviceBusConnectionStringSecretUri string
+@description('Service Bus fully-qualified namespace host, e.g. my-ns.servicebus.windows.net. The app authenticates with its managed identity (no connection string / SAS key). Grant that identity a role with topic manage + send/receive (e.g. Azure Service Bus Data Owner) scoped to this namespace/topic — each node creates its own subscription dynamically at startup, see docs/high-availability.md.')
+param serviceBusFullyQualifiedNamespace string
 
-@description('Key Vault secret URI for the Cosmos DB connection string')
-param cosmosConnectionStringSecretUri string
+@description('Cosmos DB account endpoint, e.g. https://my-acct.documents.azure.com:443/. The app authenticates with its managed identity (no account key). Grant that identity the Cosmos DB data-plane role (e.g. Cosmos DB Built-in Data Contributor) on this account.')
+param cosmosEndpoint string
 
 @description('Cosmos DB database name — must already exist')
 param cosmosDatabaseName string = 'backendcache'
@@ -73,11 +76,13 @@ resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 6379
         transport: 'tcp'
       }
+      // Only the two application-level secrets (RESP AUTH password, admin
+      // token) live in Key Vault. The Azure data dependencies (Service Bus,
+      // Cosmos DB) use managed identity instead of connection strings/keys —
+      // no broad secret to store, leak, or rotate.
       secrets: [
         { name: 'redis-auth', keyVaultUrl: redisAuthSecretUri, identity: identityId }
         { name: 'admin-token', keyVaultUrl: adminTokenSecretUri, identity: identityId }
-        { name: 'service-bus-connection-string', keyVaultUrl: serviceBusConnectionStringSecretUri, identity: identityId }
-        { name: 'cosmos-connection-string', keyVaultUrl: cosmosConnectionStringSecretUri, identity: identityId }
       ]
     }
     template: {
@@ -106,9 +111,14 @@ resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
             // NODE_ID is deliberately left unset: cluster/nodeId.ts falls
             // back to CONTAINER_APP_REPLICA_NAME, which Container Apps sets
             // automatically and uniquely per replica.
-            { name: 'SERVICE_BUS_CONNECTION_STRING', secretRef: 'service-bus-connection-string' }
+            // Managed-identity auth: the app reads these namespace/endpoint
+            // hosts and authenticates via DefaultAzureCredential (the
+            // user-assigned identity above), not a SAS key / account key.
+            // AZURE_CLIENT_ID pins which identity DefaultAzureCredential uses.
+            { name: 'AZURE_CLIENT_ID', value: identityClientId }
+            { name: 'SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE', value: serviceBusFullyQualifiedNamespace }
             { name: 'SERVICE_BUS_TOPIC_NAME', value: serviceBusTopicName }
-            { name: 'COSMOS_CONNECTION_STRING', secretRef: 'cosmos-connection-string' }
+            { name: 'COSMOS_ENDPOINT', value: cosmosEndpoint }
             { name: 'COSMOS_DATABASE', value: cosmosDatabaseName }
             { name: 'COSMOS_KEYS_CONTAINER', value: cosmosKeysContainerName }
             { name: 'COSMOS_NODES_CONTAINER', value: cosmosNodesContainerName }

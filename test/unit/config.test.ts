@@ -84,4 +84,13 @@ describe('isHaConfigured', () => {
     } as unknown as NodeJS.ProcessEnv);
     expect(isHaConfigured(config)).toBe(true);
   });
+
+  it('accepts a Service Bus namespace (managed identity) in place of a connection string', () => {
+    const config = loadConfig({
+      COSMOS_ENDPOINT: 'https://x.documents.azure.com',
+      SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE: 'my-ns.servicebus.windows.net',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(config.serviceBusFullyQualifiedNamespace).toBe('my-ns.servicebus.windows.net');
+    expect(isHaConfigured(config)).toBe(true); // fully managed-identity HA, no secrets
+  });
 });

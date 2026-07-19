@@ -3,7 +3,10 @@ import type { ReplicationEvent } from './types.js';
 import { errorMessage, logger } from '../logger.js';
 
 export interface ServiceBusConfig {
-  connectionString: string;
+  /** Full connection string (SAS-key auth). Takes precedence over fullyQualifiedNamespace. */
+  connectionString: string | null;
+  /** Namespace host (e.g. `my-ns.servicebus.windows.net`) for managed-identity (AAD) auth, used when connectionString is unset. */
+  fullyQualifiedNamespace: string | null;
   topicName: string;
   nodeId: string;
 }
@@ -76,7 +79,26 @@ export class ServiceBusReplicationTransport implements ReplicationTransport {
   async start(onMessage: (event: ReplicationEvent) => void): Promise<void> {
     const { ServiceBusClient, ServiceBusAdministrationClient } = await import('@azure/service-bus');
 
-    const adminClient: ServiceBusAdministrationClientLike = new ServiceBusAdministrationClient(this.cfg.connectionString);
+    // Prefer managed identity (AAD via DefaultAzureCredential + namespace
+    // host) over a SAS connection string, mirroring the Cosmos layer — no
+    // broad secret to store/rotate, and the topic Send/Manage grant is
+    // scoped by RBAC to this identity. Fall back to the connection string
+    // when only that is configured.
+    const { adminClient, client } = this.cfg.connectionString
+      ? {
+          adminClient: new ServiceBusAdministrationClient(this.cfg.connectionString) as ServiceBusAdministrationClientLike,
+          client: new ServiceBusClient(this.cfg.connectionString) as ServiceBusClientLike,
+        }
+      : await (async () => {
+          const { DefaultAzureCredential } = await import('@azure/identity');
+          const credential = new DefaultAzureCredential();
+          const namespace = this.cfg.fullyQualifiedNamespace as string;
+          return {
+            adminClient: new ServiceBusAdministrationClient(namespace, credential) as ServiceBusAdministrationClientLike,
+            client: new ServiceBusClient(namespace, credential) as ServiceBusClientLike,
+          };
+        })();
+
     if (!(await adminClient.topicExists(this.cfg.topicName))) {
       await adminClient.createTopic(this.cfg.topicName);
     }
@@ -88,7 +110,6 @@ export class ServiceBusReplicationTransport implements ReplicationTransport {
     }
     this.adminClient = adminClient;
 
-    const client: ServiceBusClientLike = new ServiceBusClient(this.cfg.connectionString);
     const receiver = client.createReceiver(this.cfg.topicName, this.subscriptionName, { receiveMode: 'receiveAndDelete' });
     this.client = client;
     this.sender = client.createSender(this.cfg.topicName);
