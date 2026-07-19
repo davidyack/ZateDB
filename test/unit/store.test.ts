@@ -87,6 +87,27 @@ describe('Store TTL', () => {
     expect(sweeping.stats().keyCounts.string).toBe(0);
     sweeping.close();
   });
+
+  it('active sweep evicts a key whose TTL came from EXPIRE, not just SET', () => {
+    // The sweep scans only TTL-bearing keys, so a TTL added after creation
+    // (via EXPIRE/PEXPIRE) must still be indexed and swept.
+    const sweeping = new Store(50);
+    sweeping.set('k', 'v'); // no TTL at creation
+    sweeping.pexpire('k', 10); // TTL added afterwards
+    vi.advanceTimersByTime(120);
+    expect(sweeping.stats().keyCounts.string).toBe(0);
+    sweeping.close();
+  });
+
+  it('a plain SET over a TTL key clears the TTL so the sweep leaves it alone', () => {
+    const sweeping = new Store(50);
+    sweeping.set('k', 'v', { pxMs: 10 });
+    sweeping.set('k', 'v2'); // overwrite without expiry — key should now persist
+    vi.advanceTimersByTime(120);
+    expect(sweeping.get('k')).toBe('v2');
+    expect(sweeping.stats().keyCounts.string).toBe(1);
+    sweeping.close();
+  });
 });
 
 describe('Store hashes', () => {

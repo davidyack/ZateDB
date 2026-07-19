@@ -28,6 +28,11 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5000;
  */
 export class Store {
   private data = new Map<string, Entry>();
+  // Index of keys known to carry a TTL, so the active sweep visits only those
+  // rather than scanning the whole keyspace. Kept in sync on the paths that set
+  // a TTL (set/expire) and cleared as keys expire or are deleted; the sweep
+  // also self-heals any stale entry it finds.
+  private ttlKeys = new Set<string>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly sweepIntervalMs: number = DEFAULT_SWEEP_INTERVAL_MS) {
@@ -53,6 +58,7 @@ export class Store {
     if (entry === undefined) return undefined;
     if (this.isExpired(entry, nowMs)) {
       this.data.delete(key);
+      this.ttlKeys.delete(key);
       return undefined;
     }
     return entry;
@@ -61,9 +67,17 @@ export class Store {
   private sweepExpired(): void {
     const now = Date.now();
     let evicted = 0;
-    for (const [key, entry] of this.data) {
+    // Walk only keys with a TTL set, not the whole keyspace.
+    for (const key of this.ttlKeys) {
+      const entry = this.data.get(key);
+      if (entry === undefined || entry.expiresAtMs === null) {
+        // Deleted or lost its TTL since it was indexed — drop the stale entry.
+        this.ttlKeys.delete(key);
+        continue;
+      }
       if (this.isExpired(entry, now)) {
         this.data.delete(key);
+        this.ttlKeys.delete(key);
         evicted++;
       }
     }
@@ -84,6 +98,7 @@ export class Store {
     for (const key of keys) {
       if (this.getLive(key) !== undefined) {
         this.data.delete(key);
+        this.ttlKeys.delete(key);
         removed++;
       }
     }
@@ -115,6 +130,7 @@ export class Store {
     }
 
     entry.expiresAtMs = atMs;
+    this.ttlKeys.add(key);
     return true;
   }
 
@@ -132,6 +148,10 @@ export class Store {
         ? Date.now() + opts.exSeconds * 1000
         : null;
     this.data.set(key, { type: 'string', value, expiresAtMs });
+    // SET replaces any prior entry, so its TTL state is authoritative here:
+    // index it when it carries an expiry, drop any stale index entry otherwise.
+    if (expiresAtMs !== null) this.ttlKeys.add(key);
+    else this.ttlKeys.delete(key);
   }
 
   incr(key: string): number {

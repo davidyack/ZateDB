@@ -37,7 +37,8 @@ export class Connection implements ConnectionContext {
 
   constructor(private readonly socket: Socket, private readonly deps: ConnectionDeps) {
     this.remoteAddress = `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 0}`;
-    this.mode = 'command';
+    // Starts in 'handshake'; the first command moves it to 'command' (see
+    // handleCommand), and a later SUBSCRIBE/PSUBSCRIBE to 'subscriber'.
     recordConnectionOpened();
     logger.debug('connection.opened', { connectionId: this.id, remoteAddress: this.remoteAddress });
 
@@ -69,6 +70,9 @@ export class Connection implements ConnectionContext {
 
   private handleCommand(rawArgs: string[]): void {
     const command = rawArgs[0].toUpperCase();
+    // First command leaves the handshake phase. A SUBSCRIBE/PSUBSCRIBE handler
+    // may then advance the connection to 'subscriber' during dispatch below.
+    if (this.mode === 'handshake') this.mode = 'command';
     const keyArg = commandKeyArg(command, rawArgs);
 
     const outcome = traceCommand(command, this.id, keyArg, () =>
