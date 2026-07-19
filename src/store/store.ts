@@ -2,6 +2,7 @@ import type { Entry, EntryTypeName, HashEntry, SortedSetEntry, StringEntry } fro
 import { NotAnIntegerError, WrongTypeError } from './types.js';
 import type { ScoreBound } from './scoreRange.js';
 import { scoreInRange } from './scoreRange.js';
+import { logger } from '../logger.js';
 
 export type ExpireFlag = 'NX' | 'XX' | 'GT' | 'LT';
 
@@ -59,9 +60,14 @@ export class Store {
 
   private sweepExpired(): void {
     const now = Date.now();
+    let evicted = 0;
     for (const [key, entry] of this.data) {
-      if (this.isExpired(entry, now)) this.data.delete(key);
+      if (this.isExpired(entry, now)) {
+        this.data.delete(key);
+        evicted++;
+      }
     }
+    if (evicted > 0) logger.debug('store.sweep', { evicted });
   }
 
   private requireType<T extends Entry>(key: string, type: T['type']): T | undefined {

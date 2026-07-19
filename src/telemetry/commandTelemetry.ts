@@ -40,6 +40,35 @@ export function getCommandsProcessedTotal(): number {
   return totalCommandsProcessed;
 }
 
+/**
+ * Commands whose first argument is a keyspace key, and therefore eligible to
+ * be tagged (redacted) on a span. Deliberately excludes everything else —
+ * most importantly AUTH, whose first argument is the password: it must never
+ * reach a span attribute, not even the 8-char-prefix form redactKey produces.
+ * Channels/patterns (PUBLISH/SUBSCRIBE/...) aren't keyspace keys either, so
+ * they're left untagged rather than misfiled under backendcache.key.
+ */
+const KEYSPACE_COMMANDS: ReadonlySet<string> = new Set([
+  'GET',
+  'SET',
+  'DEL',
+  'INCR',
+  'EXPIRE',
+  'PEXPIRE',
+  'HSET',
+  'HDEL',
+  'HGETALL',
+  'ZADD',
+  'ZREMRANGEBYSCORE',
+  'ZCOUNT',
+]);
+
+/** The keyspace key to redact onto a span for this command, or undefined if it has none. */
+export function commandKeyArg(command: string, rawArgs: string[]): string | undefined {
+  if (!KEYSPACE_COMMANDS.has(command)) return undefined;
+  return rawArgs.length > 1 ? rawArgs[1] : undefined;
+}
+
 export function traceCommand<T extends DispatchOutcome>(
   command: string,
   connectionId: string,

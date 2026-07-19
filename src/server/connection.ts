@@ -10,7 +10,7 @@ import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { ServerConfig } from '../config.js';
 import type { ConnectionContext, ConnectionMode } from '../commands/context.js';
 import { dispatch } from '../commands/dispatcher.js';
-import { traceCommand, recordConnectionClosed, recordConnectionOpened, recordSubscriptionChange } from '../telemetry/commandTelemetry.js';
+import { commandKeyArg, traceCommand, recordConnectionClosed, recordConnectionOpened, recordSubscriptionChange } from '../telemetry/commandTelemetry.js';
 import { logger } from '../logger.js';
 
 export interface ConnectionDeps {
@@ -39,6 +39,7 @@ export class Connection implements ConnectionContext {
     this.remoteAddress = `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 0}`;
     this.mode = 'command';
     recordConnectionOpened();
+    logger.debug('connection.opened', { connectionId: this.id, remoteAddress: this.remoteAddress });
 
     socket.on('data', (chunk) => this.onData(chunk));
     socket.on('error', (err) => this.onError(err));
@@ -51,6 +52,7 @@ export class Connection implements ConnectionContext {
       commands = this.parser.feed(chunk);
     } catch (err) {
       if (err instanceof RespProtocolError) {
+        logger.debug('connection.protocol_error', { connectionId: this.id, remoteAddress: this.remoteAddress, error: err.message });
         this.write(respError(`ERR Protocol error: ${err.message}`));
         this.socket.end();
         return;
@@ -67,11 +69,18 @@ export class Connection implements ConnectionContext {
 
   private handleCommand(rawArgs: string[]): void {
     const command = rawArgs[0].toUpperCase();
-    const keyArg = rawArgs.length > 1 ? rawArgs[1] : undefined;
+    const keyArg = commandKeyArg(command, rawArgs);
 
     const outcome = traceCommand(command, this.id, keyArg, () =>
       dispatch({ store: this.deps.store, pubsub: this.deps.pubsub, conn: this, config: this.deps.config }, rawArgs),
     );
+
+    // Command errors are logged as lightweight lifecycle markers. The command
+    // name and connection id only — never argument values, which can carry key
+    // names, cached payloads, or (for AUTH) the password.
+    if (outcome.isError) {
+      logger.debug('command.error', { connectionId: this.id, remoteAddress: this.remoteAddress, command: outcome.command });
+    }
 
     for (const frame of outcome.frames) this.write(frame);
 
