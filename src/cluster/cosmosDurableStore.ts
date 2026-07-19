@@ -27,8 +27,14 @@ interface CosmosQueryIterator<T> {
   fetchNext(): Promise<CosmosFeedResponse<T>>;
   fetchAll(): Promise<CosmosFeedResponse<T>>;
 }
+interface CosmosPatchOperation {
+  op: 'set' | 'remove';
+  path: string;
+  value?: unknown;
+}
 interface CosmosItemLike {
   delete(): Promise<unknown>;
+  patch(operations: CosmosPatchOperation[]): Promise<unknown>;
 }
 interface CosmosContainerLike {
   items: {
@@ -55,17 +61,32 @@ function toDocId(raw: string): string {
   return Buffer.from(raw, 'utf8').toString('base64url');
 }
 
+/** Escapes a hash field / sorted-set member name for use as a JSON Pointer path segment (RFC 6901: '~' -> '~0', '/' -> '~1'). */
+function escapeJsonPointerSegment(segment: string): string {
+  return segment.replace(/~/g, '~0').replace(/\//g, '~1');
+}
+
 function isNotFound(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 404;
 }
 
+/** Cosmos DB's documented limit on the number of operations in a single Patch request. */
+const PATCH_BATCH_SIZE = 10;
+
+interface FieldOp {
+  name: string;
+  op: 'set' | 'remove';
+  value?: unknown;
+}
+
 /**
  * Durable backing store for cluster mode: Cosmos DB as the source of truth
- * a node hydrates from at startup. Uses plain upserts/deletes (no stored
- * procedures, no Lua) — atomicity per key comes from Cosmos's own
- * last-write-wins document semantics, matching the same eventual-sync
- * model the Service Bus replication transport uses. See
- * docs/high-availability.md for the consistency model this implies.
+ * a node hydrates from at startup. Uses plain upserts/deletes and the
+ * Patch API (no stored procedures, no Lua) — atomicity per key/field
+ * comes from Cosmos's own document/property-level write semantics,
+ * matching the same eventual-sync model the Service Bus replication
+ * transport uses. See docs/high-availability.md for the consistency
+ * model this implies.
  */
 export class CosmosDurableStore implements DurableStore {
   readonly kind = 'cosmos' as const;
@@ -121,6 +142,94 @@ export class CosmosDurableStore implements DurableStore {
       await this.keysContainer.item(toDocId(key), key).delete();
     } catch (err) {
       if (!isNotFound(err)) throw err;
+    }
+  }
+
+  async putHashFields(key: string, fields: Array<[string, string]>): Promise<void> {
+    await this.patchSubDocument(
+      key,
+      'fields',
+      fields.map(([name, value]): FieldOp => ({ name, op: 'set', value })),
+      () => ({
+        id: toDocId(key),
+        key,
+        entry: { type: 'hash', fields: Object.fromEntries(fields), expiresAtMs: null },
+        updatedAtMs: Date.now(),
+      }),
+    );
+  }
+
+  async deleteHashFields(key: string, fields: string[]): Promise<void> {
+    await this.patchSubDocument(
+      key,
+      'fields',
+      fields.map((name): FieldOp => ({ name, op: 'remove' })),
+      null, // nothing to delete from a document that doesn't exist — no fallback creation
+    );
+  }
+
+  async putZsetMembers(key: string, members: Array<[string, number]>): Promise<void> {
+    await this.patchSubDocument(
+      key,
+      'members',
+      members.map(([name, value]): FieldOp => ({ name, op: 'set', value })),
+      () => ({
+        id: toDocId(key),
+        key,
+        entry: { type: 'sortedset', members: Object.fromEntries(members), expiresAtMs: null },
+        updatedAtMs: Date.now(),
+      }),
+    );
+  }
+
+  async deleteZsetMembers(key: string, members: string[]): Promise<void> {
+    await this.patchSubDocument(
+      key,
+      'members',
+      members.map((name): FieldOp => ({ name, op: 'remove' })),
+      null,
+    );
+  }
+
+  /**
+   * Applies field/member-level operations via Cosmos's Patch API — a
+   * targeted `set`/`remove` on `/entry/<subField>/<name>`, not a
+   * read-modify-write of the whole document, so two nodes patching
+   * *different* fields of the same key never race on the whole entry.
+   * Batched at PATCH_BATCH_SIZE ops per request (Cosmos's own limit). If
+   * the very first batch 404s (the document doesn't exist yet),
+   * buildFallbackDoc creates it in one upsert covering every operation in
+   * this call — there's nothing to reconcile from later batches since the
+   * fallback already captures all of them. A 404 on any *later* batch
+   * would mean the document vanished mid-patch (e.g. a concurrent whole-key
+   * delete) — an unexpected but non-corrupting race, surfaced by rethrowing
+   * so the caller's existing best-effort logging picks it up rather than
+   * silently losing the rest of the write.
+   */
+  private async patchSubDocument(
+    key: string,
+    subField: 'fields' | 'members',
+    ops: FieldOp[],
+    buildFallbackDoc: (() => Record<string, unknown>) | null,
+  ): Promise<void> {
+    if (ops.length === 0) return;
+    const id = toDocId(key);
+    for (let i = 0; i < ops.length; i += PATCH_BATCH_SIZE) {
+      const batch = ops.slice(i, i + PATCH_BATCH_SIZE);
+      const patchOps: CosmosPatchOperation[] = batch.map((fieldOp) => ({
+        op: fieldOp.op,
+        path: `/entry/${subField}/${escapeJsonPointerSegment(fieldOp.name)}`,
+        value: fieldOp.value,
+      }));
+      try {
+        await this.keysContainer.item(id, key).patch(patchOps);
+      } catch (err) {
+        if (isNotFound(err) && i === 0) {
+          if (buildFallbackDoc) await this.keysContainer.items.upsert(buildFallbackDoc());
+          return; // the fallback doc (or the no-op delete case) already covers every op in `ops`
+        }
+        throw err;
+      }
     }
   }
 

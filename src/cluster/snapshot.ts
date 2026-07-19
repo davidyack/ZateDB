@@ -7,9 +7,9 @@ export function entryToSnapshot(entry: Entry): EntrySnapshot {
     return { type: 'string', value: entry.value, expiresAtMs: entry.expiresAtMs };
   }
   if (entry.type === 'hash') {
-    return { type: 'hash', fields: Array.from(entry.fields.entries()), expiresAtMs: entry.expiresAtMs };
+    return { type: 'hash', fields: Object.fromEntries(entry.fields), expiresAtMs: entry.expiresAtMs };
   }
-  return { type: 'sortedset', members: Array.from(entry.members.entries()), expiresAtMs: entry.expiresAtMs };
+  return { type: 'sortedset', members: Object.fromEntries(entry.members), expiresAtMs: entry.expiresAtMs };
 }
 
 /** Converts a JSON-safe snapshot back into a live Store entry (Map-based). */
@@ -18,7 +18,7 @@ export function snapshotToEntry(snapshot: EntrySnapshot): Entry {
     return { type: 'string', value: snapshot.value, expiresAtMs: snapshot.expiresAtMs };
   }
   if (snapshot.type === 'hash') {
-    return { type: 'hash', fields: new Map(snapshot.fields), expiresAtMs: snapshot.expiresAtMs };
+    return { type: 'hash', fields: new Map(Object.entries(snapshot.fields)), expiresAtMs: snapshot.expiresAtMs };
   }
-  return { type: 'sortedset', members: new Map(snapshot.members), expiresAtMs: snapshot.expiresAtMs };
+  return { type: 'sortedset', members: new Map(Object.entries(snapshot.members)), expiresAtMs: snapshot.expiresAtMs };
 }

@@ -17,14 +17,27 @@ input and binary-safe bulk strings), store/TTL behavior (lazy expiry,
 active sweep, `WRONGTYPE` errors), the pub/sub registry (channel/pattern
 delivery, disconnect cleanup), sorted-set range-bound parsing, and
 `ClusterCoordinator` ([`test/unit/clusterCoordinator.test.ts`](../test/unit/clusterCoordinator.test.ts)):
-standalone-mode no-ops, startup hydration from a durable store, cross-node
-convergence for key mutations and `PUBLISH`, self-origin filtering, and
-`drain()`. These run against `FakeDurableStore`/`FakeReplicationHub`
-in-memory doubles ([`test/helpers/fakeCluster.ts`](../test/helpers/fakeCluster.ts))
-rather than real Azure resources — no network dependency, and the doubles
-mirror the real Cosmos/Service Bus implementations' contracts (including
-the transport's self-origin message filter) closely enough to catch a
+standalone-mode no-ops, startup hydration from a durable store (including
+a live write arriving mid-hydration not being clobbered by the snapshot),
+cross-node convergence for key mutations and `PUBLISH`, field-level
+convergence for concurrent `HSET`/`ZADD` on *different* fields/members of
+the same key, self-origin filtering, and `drain()`. These run against
+`FakeDurableStore`/`FakeReplicationHub` in-memory doubles
+([`test/helpers/fakeCluster.ts`](../test/helpers/fakeCluster.ts)) rather
+than real Azure resources — no network dependency, and the doubles mirror
+the real Cosmos/Service Bus implementations' contracts (including the
+transport's self-origin message filter) closely enough to catch a
 regression in the coordinator's own logic.
+
+[`test/unit/dispatcherReplication.test.ts`](../test/unit/dispatcherReplication.test.ts)
+covers the dispatcher's replication *decisions* specifically: no-op
+commands against a key this node never had ship nothing (not a phantom
+delete), `SET`/`INCR`/`HSET`/`ZADD` still replicate when creating a brand
+new key, a partial `HDEL`/`ZREMRANGEBYSCORE` replicates only the removed
+field/member (verified against the exact shape landed in the durable
+store) while removing the last one replicates a whole-key delete instead
+of a leftover empty hash/set, and sequential writes to the same key
+replicate in call order despite artificially reordered network latency.
 
 ## Integration tests
 

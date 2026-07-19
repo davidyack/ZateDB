@@ -161,7 +161,7 @@ describe('Store sorted sets', () => {
       [now - 1000, 'recent'],
     ]);
     const removed = store.zremrangebyscore('workspace:w1', parseScoreBound('0'), parseScoreBound(String(now - dayMs)));
-    expect(removed).toBe(1);
+    expect(removed).toEqual(['too-old']);
     expect(store.zcount('workspace:w1', parseScoreBound('-inf'), parseScoreBound('+inf'))).toBe(1);
   });
 

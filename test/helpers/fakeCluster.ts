@@ -21,6 +21,34 @@ export class FakeDurableStore implements DurableStore {
   async deleteKey(key: string): Promise<void> {
     this.keys.delete(key);
   }
+  async putHashFields(key: string, fields: Array<[string, string]>): Promise<void> {
+    const existing = this.keys.get(key);
+    const base = existing?.type === 'hash' ? existing.fields : {};
+    const merged = { ...base };
+    for (const [field, value] of fields) merged[field] = value;
+    this.keys.set(key, { type: 'hash', fields: merged, expiresAtMs: existing?.type === 'hash' ? existing.expiresAtMs : null });
+  }
+  async deleteHashFields(key: string, fields: string[]): Promise<void> {
+    const existing = this.keys.get(key);
+    if (existing?.type !== 'hash') return;
+    const merged = { ...existing.fields };
+    for (const field of fields) delete merged[field];
+    this.keys.set(key, { ...existing, fields: merged });
+  }
+  async putZsetMembers(key: string, members: Array<[string, number]>): Promise<void> {
+    const existing = this.keys.get(key);
+    const base = existing?.type === 'sortedset' ? existing.members : {};
+    const merged = { ...base };
+    for (const [member, score] of members) merged[member] = score;
+    this.keys.set(key, { type: 'sortedset', members: merged, expiresAtMs: existing?.type === 'sortedset' ? existing.expiresAtMs : null });
+  }
+  async deleteZsetMembers(key: string, members: string[]): Promise<void> {
+    const existing = this.keys.get(key);
+    if (existing?.type !== 'sortedset') return;
+    const merged = { ...existing.members };
+    for (const member of members) delete merged[member];
+    this.keys.set(key, { ...existing, members: merged });
+  }
   async putNodeSnapshot(snapshot: NodeSnapshot): Promise<void> {
     this.nodes.set(snapshot.nodeId, snapshot);
   }

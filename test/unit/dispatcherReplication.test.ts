@@ -86,8 +86,65 @@ describe('dispatcher cluster replication correctness', () => {
     await cluster.drain(500);
     expect(durable.keys.has('new-string')).toBe(true);
     expect(durable.keys.has('new-counter')).toBe(true);
-    expect(durable.keys.has('new-hash')).toBe(true);
-    expect(durable.keys.has('new-zset')).toBe(true);
+    expect(durable.keys.get('new-hash')).toEqual({ type: 'hash', fields: { f: 'v' }, expiresAtMs: null });
+    expect(durable.keys.get('new-zset')).toEqual({ type: 'sortedset', members: { member: 1 }, expiresAtMs: null });
+  });
+
+  it('a partial HDEL replicates only the removed field, leaving the rest of the hash in the durable store untouched', async () => {
+    dispatch(ctx, ['HSET', 'presence:room1', 'user1', 'online', 'user2', 'online']);
+    await cluster.drain(500);
+    expect(durable.keys.get('presence:room1')).toEqual({
+      type: 'hash',
+      fields: { user1: 'online', user2: 'online' },
+      expiresAtMs: null,
+    });
+
+    dispatch(ctx, ['HDEL', 'presence:room1', 'user1']);
+    await cluster.drain(500);
+    expect(durable.keys.get('presence:room1')).toEqual({ type: 'hash', fields: { user2: 'online' }, expiresAtMs: null });
+  });
+
+  it('HDEL removing the last field replicates a field-level delete, not a whole-key delete', async () => {
+    // Deliberately NOT a whole-key delete: another node could still hold a
+    // field on this same key that hasn't replicated here yet (see the
+    // two-node test below), and a whole-key delete would destroy it. An
+    // empty hash entry lingering in the durable store is harmless — no
+    // exposed command can tell "hash exists with zero fields" apart from
+    // "key doesn't exist" (see docs/high-availability.md).
+    dispatch(ctx, ['HSET', 'presence:room2', 'user1', 'online']);
+    await cluster.drain(500);
+    expect(durable.keys.has('presence:room2')).toBe(true);
+
+    dispatch(ctx, ['HDEL', 'presence:room2', 'user1']);
+    await cluster.drain(500);
+    expect(durable.keys.get('presence:room2')).toEqual({ type: 'hash', fields: {}, expiresAtMs: null });
+    expect(ctx.store.hgetall('presence:room2')).toEqual([]); // locally, this node still correctly reports the key as empty/gone
+  });
+
+  it('a partial ZREMRANGEBYSCORE replicates only the removed members, leaving the rest of the set in the durable store untouched', async () => {
+    const now = 1_700_000_000_000;
+    const dayMs = 24 * 60 * 60 * 1000;
+    dispatch(ctx, ['ZADD', 'guard:w1', String(now - dayMs - 1), 'too-old', String(now - 1000), 'recent']);
+    await cluster.drain(500);
+    expect(durable.keys.get('guard:w1')).toEqual({
+      type: 'sortedset',
+      members: { 'too-old': now - dayMs - 1, recent: now - 1000 },
+      expiresAtMs: null,
+    });
+
+    dispatch(ctx, ['ZREMRANGEBYSCORE', 'guard:w1', '0', String(now - dayMs)]);
+    await cluster.drain(500);
+    expect(durable.keys.get('guard:w1')).toEqual({ type: 'sortedset', members: { recent: now - 1000 }, expiresAtMs: null });
+  });
+
+  it('ZREMRANGEBYSCORE removing the last member replicates a member-level delete, not a whole-key delete', async () => {
+    dispatch(ctx, ['ZADD', 'guard:w2', '1', 'evt']);
+    await cluster.drain(500);
+    expect(durable.keys.has('guard:w2')).toBe(true);
+
+    dispatch(ctx, ['ZREMRANGEBYSCORE', 'guard:w2', '-inf', '+inf']);
+    await cluster.drain(500);
+    expect(durable.keys.get('guard:w2')).toEqual({ type: 'sortedset', members: {}, expiresAtMs: null });
   });
 
   it('replicates a genuine DEL of an existing key', async () => {
@@ -133,5 +190,73 @@ describe('dispatcher cluster replication correctness', () => {
     firstPutResolve();
     await cluster.drain(1000);
     expect(durable.keys.get('race-key')).toEqual({ type: 'string', value: 'v3', expiresAtMs: null });
+  });
+});
+
+/**
+ * Two-node reproduction of the exact failure scenario a code review
+ * caught: HDEL used to replicate every field name the client *asked* to
+ * delete, not the ones actually removed locally. A client naming a field
+ * this node never had (because another node's concurrent HSET for it
+ * hadn't replicated in yet) would broadcast a delete for that field too —
+ * destroying the other node's real value.
+ */
+describe('HDEL only replicates fields that actually existed on this node (two nodes)', () => {
+  let durable: FakeDurableStore;
+  let storeA: Store, storeB: Store;
+  let clusterA: ClusterCoordinator, clusterB: ClusterCoordinator;
+  let ctxA: CommandContext, ctxB: CommandContext;
+
+  beforeEach(async () => {
+    durable = new FakeDurableStore();
+    const hub = new FakeReplicationHub();
+
+    const build = (nodeId: string, store: Store, pubsub: PubSubRegistry) =>
+      new ClusterCoordinator({
+        store,
+        pubsub,
+        durable,
+        transport: hub.createTransport(nodeId),
+        nodeId,
+        haEnabled: true,
+        heartbeatIntervalMs: 10_000,
+        nodeStaleMs: 30_000,
+        connectionCount: () => 0,
+        commandsTotal: () => 0,
+      });
+
+    storeA = new Store(0);
+    const pubsubA = new PubSubRegistry();
+    clusterA = build('node-a', storeA, pubsubA);
+    ctxA = { store: storeA, pubsub: pubsubA, conn: fakeConn(), config: loadConfig({}), cluster: clusterA };
+
+    storeB = new Store(0);
+    const pubsubB = new PubSubRegistry();
+    clusterB = build('node-b', storeB, pubsubB);
+    ctxB = { store: storeB, pubsub: pubsubB, conn: fakeConn(), config: loadConfig({}), cluster: clusterB };
+
+    await Promise.all([clusterA.start(), clusterB.start()]);
+  });
+
+  afterEach(async () => {
+    await Promise.all([clusterA.stop(), clusterB.stop()]);
+    storeA.close();
+    storeB.close();
+  });
+
+  it("naming a field on HDEL that only exists on the other node doesn't delete it there", async () => {
+    dispatch(ctxA, ['HSET', 'h', 'a', 'v1']); // node A has field 'a' locally now
+    dispatch(ctxB, ['HSET', 'h', 'b', 'v2']); // node B has field 'b' locally now — its replication to A is fire-and-forget and hasn't been delivered yet (delivery always takes at least one microtask tick; nothing here has awaited yet)
+
+    // Node A defensively deletes both names — at this exact moment, before
+    // any `await`, node A's local store only has 'a' (B's HSET for 'b'
+    // hasn't arrived): this is the race window the fix has to get right.
+    dispatch(ctxA, ['HDEL', 'h', 'a', 'b']);
+
+    await Promise.all([clusterA.drain(1000), clusterB.drain(1000)]); // let everything (including B's now-delivered HSET) settle
+
+    expect(storeB.hgetall('h')).toEqual([['b', 'v2']]); // node B's field survives
+    expect(storeA.hgetall('h')).toEqual([['b', 'v2']]); // and converges onto node A too, once B's HSET arrives
+    expect(durable.keys.get('h')).toEqual({ type: 'hash', fields: { b: 'v2' }, expiresAtMs: null });
   });
 });

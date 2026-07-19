@@ -102,29 +102,17 @@ export class ClusterCoordinator {
   }
 
   /**
-   * Call after a mutating command (SET/INCR/EXPIRE/PEXPIRE/HSET/HDEL/
-   * ZADD/ZREMRANGEBYSCORE/DEL) has already been applied to the local
-   * store. Reads the resulting state back and ships it out — an entry
-   * that no longer exists is replicated as a delete. Publishes for the
-   * same key are chained in call order (not run concurrently): otherwise
-   * two independent fire-and-forget network round trips for e.g. two
-   * rapid SETs on the same key could complete out of order and leave the
-   * cluster converged on the older value.
+   * Call after a mutating command (SET/INCR/EXPIRE/PEXPIRE/DEL) has
+   * already been applied to the local store. Reads the resulting state
+   * back and ships it out — an entry that no longer exists is replicated
+   * as a delete. Whole-entry: for HSET/HDEL/ZADD/ZREMRANGEBYSCORE, prefer
+   * publishHashFieldChange/publishZsetMemberChange instead, which
+   * replicate only the touched fields/members.
    */
   publishKeyChange(key: string): void {
     if (!this.haEnabled) return;
     const entry = this.deps.store.getRawEntry(key);
-    const prior = this.lastPublishByKey.get(key) ?? Promise.resolve();
-    const task = prior.then(() =>
-      this.doPublishKeyChange(key, entry).catch((err) => {
-        logger.warn('cluster.replicate_failed', { key: redactKey(key), error: errorMessage(err) });
-      }),
-    );
-    this.lastPublishByKey.set(key, task);
-    void task.finally(() => {
-      if (this.lastPublishByKey.get(key) === task) this.lastPublishByKey.delete(key);
-    });
-    this.track(task);
+    this.enqueueForKey(key, () => this.doPublishKeyChange(key, entry));
   }
 
   private async doPublishKeyChange(key: string, entry: ReturnType<Store['getRawEntry']>): Promise<void> {
@@ -142,6 +130,42 @@ export class ClusterCoordinator {
     }
   }
 
+  /**
+   * Call after a successful HSET (setFields non-empty) or a HDEL that
+   * left the hash with at least one field remaining (deletedFields
+   * non-empty) — a HDEL that emptied the hash entirely should go through
+   * publishKeyChange instead, so the whole key is deleted cluster-wide
+   * rather than left as an empty hash. Replicating at field granularity
+   * (not the whole hash) is what lets two nodes set *different* fields of
+   * the same key concurrently without either write clobbering the other.
+   */
+  publishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): void {
+    if (!this.haEnabled || (setFields.length === 0 && deletedFields.length === 0)) return;
+    this.enqueueForKey(key, () => this.doPublishHashFieldChange(key, setFields, deletedFields));
+  }
+
+  private async doPublishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): Promise<void> {
+    const tasks: Array<Promise<unknown>> = [];
+    if (setFields.length > 0) tasks.push(this.deps.durable.putHashFields(key, setFields));
+    if (deletedFields.length > 0) tasks.push(this.deps.durable.deleteHashFields(key, deletedFields));
+    tasks.push(this.deps.transport.publish(this.makeEvent({ kind: 'hashField', key, setFields, deletedFields })));
+    await Promise.all(tasks);
+  }
+
+  /** Same idea as publishHashFieldChange, for ZADD/ZREMRANGEBYSCORE — see that method's doc comment. */
+  publishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): void {
+    if (!this.haEnabled || (setMembers.length === 0 && deletedMembers.length === 0)) return;
+    this.enqueueForKey(key, () => this.doPublishZsetMemberChange(key, setMembers, deletedMembers));
+  }
+
+  private async doPublishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): Promise<void> {
+    const tasks: Array<Promise<unknown>> = [];
+    if (setMembers.length > 0) tasks.push(this.deps.durable.putZsetMembers(key, setMembers));
+    if (deletedMembers.length > 0) tasks.push(this.deps.durable.deleteZsetMembers(key, deletedMembers));
+    tasks.push(this.deps.transport.publish(this.makeEvent({ kind: 'zsetMember', key, setMembers, deletedMembers })));
+    await Promise.all(tasks);
+  }
+
   /** Cross-node fan-out for PUBLISH — local delivery already happened via the pub/sub registry before this is called. */
   publishMessage(channel: string, message: string): void {
     if (!this.haEnabled) return;
@@ -152,6 +176,27 @@ export class ClusterCoordinator {
     );
   }
 
+  /**
+   * Chains `task` behind any prior publish for the same key (not run
+   * concurrently): otherwise two independent fire-and-forget network
+   * round trips for e.g. two rapid SETs (or a SET and a field change) on
+   * the same key could complete out of order and leave the cluster
+   * converged on stale state.
+   */
+  private enqueueForKey(key: string, task: () => Promise<void>): void {
+    const prior = this.lastPublishByKey.get(key) ?? Promise.resolve();
+    const chained = prior.then(() =>
+      task().catch((err) => {
+        logger.warn('cluster.replicate_failed', { key: redactKey(key), error: errorMessage(err) });
+      }),
+    );
+    this.lastPublishByKey.set(key, chained);
+    void chained.finally(() => {
+      if (this.lastPublishByKey.get(key) === chained) this.lastPublishByKey.delete(key);
+    });
+    this.track(chained);
+  }
+
   private applyRemoteEvent(event: ReplicationEvent): void {
     try {
       if (event.kind === 'upsert' && event.key !== undefined && event.entry !== undefined) {
@@ -160,6 +205,12 @@ export class ClusterCoordinator {
         this.deps.store.applyReplicatedDelete(event.key);
       } else if (event.kind === 'publish' && event.channel !== undefined && event.message !== undefined) {
         this.deps.pubsub.publish(event.channel, event.message);
+      } else if (event.kind === 'hashField' && event.key !== undefined) {
+        if (event.setFields?.length) this.deps.store.applyReplicatedHashFieldSet(event.key, event.setFields);
+        if (event.deletedFields?.length) this.deps.store.applyReplicatedHashFieldDelete(event.key, event.deletedFields);
+      } else if (event.kind === 'zsetMember' && event.key !== undefined) {
+        if (event.setMembers?.length) this.deps.store.applyReplicatedZsetMemberSet(event.key, event.setMembers);
+        if (event.deletedMembers?.length) this.deps.store.applyReplicatedZsetMemberDelete(event.key, event.deletedMembers);
       }
     } catch (err) {
       logger.warn('cluster.apply_remote_event_failed', { kind: event.kind, error: errorMessage(err) });

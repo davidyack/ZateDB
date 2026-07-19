@@ -101,17 +101,28 @@ distributed-consensus one. Concretely:
   to Cosmos DB — that's the whole point of the in-memory hot copy. A key
   written on another node is visible locally once its replication event
   arrives, not before.
-- **A hash/sorted-set is replicated as a whole snapshot, not per-field.**
-  `HSET`/`HDEL`/`ZADD`/`ZREMRANGEBYSCORE` ship the entire post-mutation
-  entry (every field, every member), not just the changed field. Two
-  nodes concurrently setting *different* fields of the *same* presence
-  hash within one replication window (`HSET presence:room1 user1 online`
-  on node A, `HSET presence:room1 user2 online` on node B) converge on
-  whichever full snapshot lands last — the other node's field update is
-  silently lost, not merged. This is a real, stronger failure mode than
-  the `INCR` counter race above (a lost field, not just a stale count);
-  avoid concurrent writes to *different* fields of the same presence/set
-  key from different nodes if that matters for a given use case.
+- **A hash/sorted-set replicates at field/member granularity, not as a
+  whole snapshot, and this is never downgraded to a whole-key delete.**
+  `HSET`/`ZADD` ship only the specific field/value or member/score pairs
+  they set; `HDEL`/`ZREMRANGEBYSCORE` ship only the specific field/member
+  names that actually existed here and were removed — even when removing
+  the last one empties this node's local copy. That's deliberate: another
+  node may still hold a field/member on the same key that hasn't
+  replicated in yet, and a whole-key delete would destroy it. (There's no
+  client-observable difference anyway between "hash/sorted-set exists with
+  zero fields/members" and "key is gone" — `HGETALL`/`ZCOUNT` return the
+  same empty result either way, and no `EXISTS`/`TYPE` command is exposed
+  — so an empty entry lingering in Cosmos DB is a harmless storage-hygiene
+  cost, not a correctness one.) This means two nodes concurrently setting
+  *different* fields of the *same* presence hash (`HSET presence:room1
+  user1 online` on node A, `HSET presence:room1 user2 online` on node B)
+  both survive regardless of arrival order — each patches only its own
+  field, on Cosmos DB and on every node's in-memory copy. Concurrently
+  writing the *same* field/member from two different nodes still races
+  exactly like the `INCR` bullet above (last-write-wins on that one field)
+  — this doesn't create a new failure mode, it just narrows the existing
+  one from "the whole key" down to "the one field/member actually
+  contended."
 - **A no-op never replicates.** `EXPIRE`/`PEXPIRE`/`HDEL`/
   `ZREMRANGEBYSCORE`/`DEL` against a key this node doesn't currently hold
   locally ship nothing at all — the dispatcher checks whether the key
@@ -186,9 +197,17 @@ closed to the well-understood single-node behavior.
   Shared Access Policy to have **Manage** rights, not just Send/Listen —
   see [`infra/backendcache.bicep`](../infra/backendcache.bicep).
 - **Cosmos DB documents are never Lua/stored-procedure driven** — every
-  operation is a plain upsert, delete, or query via the SDK, keeping the
-  "no embedded scripting engine" property from [Non-goals](./command-reference.md#non-goals)
-  intact end to end.
+  operation is a plain upsert, delete, query, or Patch-API call via the
+  SDK, keeping the "no embedded scripting engine" property from
+  [Non-goals](./command-reference.md#non-goals) intact end to end.
+  Field/member-level `HSET`/`HDEL`/`ZADD`/`ZREMRANGEBYSCORE` replication
+  uses Cosmos's Patch API (targeted `set`/`remove` operations on
+  `/entry/fields/<name>` or `/entry/members/<name>`) rather than a
+  read-modify-write of the whole document — see
+  [`src/cluster/cosmosDurableStore.ts`](../src/cluster/cosmosDurableStore.ts).
+  Field/member names are escaped as JSON Pointer segments (`~` and `/`)
+  since Redis key/field names can contain either, and patch operations are
+  batched at 10 per request (Cosmos's own per-call limit).
 - **Key names as document ids**: Redis key names routinely contain
   characters Cosmos DB document ids forbid (`/`, `#`, `?`); the `id` field
   is a base64url encoding of the key, with the original key kept verbatim

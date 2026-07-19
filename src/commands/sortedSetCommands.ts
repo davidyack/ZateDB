@@ -28,7 +28,7 @@ export function zremrangebyscore(ctx: CommandContext, args: string[]): CommandRe
   try {
     const min = parseScoreBound(minRaw);
     const max = parseScoreBound(maxRaw);
-    return result(integer(ctx.store.zremrangebyscore(key, min, max)));
+    return result(integer(ctx.store.zremrangebyscore(key, min, max).length));
   } catch (e) {
     if (e instanceof InvalidScoreRangeError) return result(error(e.message));
     if (e instanceof WrongTypeError) return result(error(e.message));

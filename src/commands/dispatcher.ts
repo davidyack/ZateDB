@@ -18,20 +18,30 @@ interface CommandSpec {
    * hand-maintained list elsewhere) so a future mutating command can't be
    * added to COMMANDS without a reviewer having to also remember a second
    * place to register it for cluster replication. Absent for read-only
-   * and connection-management commands.
+   * and connection-management commands, and for the field-level commands
+   * below (they replicate at field/member granularity instead — see
+   * `fieldReplication`).
    */
   mutatedKeys?: (args: string[]) => string[];
+  /**
+   * HSET/HDEL/ZADD/ZREMRANGEBYSCORE replicate only the specific
+   * fields/members they touched (not the whole hash/sorted set) — see
+   * replicateFieldLevelMutation. This flag routes them there instead of
+   * through the generic whole-key `mutatedKeys` path.
+   */
+  fieldReplication?: 'hash' | 'zset';
 }
 
 function spec(
   handler: CommandHandler,
-  opts: Partial<Pick<CommandSpec, 'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys'>> = {},
+  opts: Partial<Pick<CommandSpec, 'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys' | 'fieldReplication'>> = {},
 ): CommandSpec {
   return {
     handler,
     allowedPreAuth: opts.allowedPreAuth ?? false,
     allowedInSubscriberMode: opts.allowedInSubscriberMode ?? false,
     mutatedKeys: opts.mutatedKeys,
+    fieldReplication: opts.fieldReplication,
   };
 }
 
@@ -52,12 +62,12 @@ const COMMANDS: Record<string, CommandSpec> = {
   EXPIRE: spec(stringCommands.expire, { mutatedKeys: singleKey }),
   PEXPIRE: spec(stringCommands.pexpire, { mutatedKeys: singleKey }),
 
-  HSET: spec(hashCommands.hset, { mutatedKeys: singleKey }),
-  HDEL: spec(hashCommands.hdel, { mutatedKeys: singleKey }),
+  HSET: spec(hashCommands.hset, { fieldReplication: 'hash' }),
+  HDEL: spec(hashCommands.hdel, { fieldReplication: 'hash' }),
   HGETALL: spec(hashCommands.hgetall),
 
-  ZADD: spec(sortedSetCommands.zadd, { mutatedKeys: singleKey }),
-  ZREMRANGEBYSCORE: spec(sortedSetCommands.zremrangebyscore, { mutatedKeys: singleKey }),
+  ZADD: spec(sortedSetCommands.zadd, { fieldReplication: 'zset' }),
+  ZREMRANGEBYSCORE: spec(sortedSetCommands.zremrangebyscore, { fieldReplication: 'zset' }),
   ZCOUNT: spec(sortedSetCommands.zcount),
 
   PUBLISH: spec(pubsubCommands.publish),
@@ -70,6 +80,99 @@ const COMMANDS: Record<string, CommandSpec> = {
 export interface DispatchOutcome extends CommandResult {
   command: string;
   isError: boolean;
+}
+
+/**
+ * HDEL/ZREMRANGEBYSCORE both need to know *which* fields/members actually
+ * existed before the command ran, not just which ones the client asked to
+ * remove: a client can (and defensively often does) name fields that were
+ * never present on this node — e.g. HDEL h a b where b only exists on
+ * another node's copy, not yet replicated here. Replicating "b was
+ * deleted" in that case would destroy a real value that node holds.
+ * ZREMRANGEBYSCORE never gets an explicit field list to begin with (a
+ * score range doesn't say which members it will match until the command
+ * actually runs), so it always needs the before-snapshot; HDEL only needs
+ * it to filter its explicit args down to the ones that actually existed.
+ * HSET/ZADD don't need any of this — they only ever set fields/members
+ * named directly in their own args, never delete anything.
+ */
+interface FieldReplicationPrep {
+  hashFieldsBefore: Set<string> | null;
+  zsetMembersBefore: Set<string> | null;
+}
+
+function prepareFieldReplication(ctx: CommandContext, command: string, key: string): FieldReplicationPrep {
+  if (command !== 'HDEL' && command !== 'ZREMRANGEBYSCORE') {
+    return { hashFieldsBefore: null, zsetMembersBefore: null };
+  }
+  const entry = ctx.store.getRawEntry(key);
+  return {
+    hashFieldsBefore: command === 'HDEL' && entry?.type === 'hash' ? new Set(entry.fields.keys()) : null,
+    zsetMembersBefore: command === 'ZREMRANGEBYSCORE' && entry?.type === 'sortedset' ? new Set(entry.members.keys()) : null,
+  };
+}
+
+/**
+ * Called after a successful HSET/HDEL/ZADD/ZREMRANGEBYSCORE to replicate
+ * only the fields/members it actually touched, reading the authoritative
+ * post-mutation value back from the local store rather than re-deriving
+ * it from args (so replication can never drift from whatever the command
+ * actually stored).
+ *
+ * HDEL/ZREMRANGEBYSCORE never fall back to a whole-key delete even when
+ * removing the last field/member empties this node's local copy: another
+ * node may still hold fields/members that haven't replicated in yet, and
+ * there's no client-observable difference anyway between "hash/sorted-set
+ * exists with zero fields/members" and "key is gone" (HGETALL/ZCOUNT
+ * return the same empty result either way, and no EXISTS/TYPE command is
+ * exposed) — so it's strictly safer to always replicate at field/member
+ * granularity here and let each node clean up its own empty local entry
+ * independently (see Store.applyReplicatedHashFieldDelete/
+ * applyReplicatedZsetMemberDelete).
+ */
+function replicateFieldLevelMutation(ctx: CommandContext, command: string, args: string[], prep: FieldReplicationPrep): void {
+  const key = args[0];
+
+  if (command === 'HSET') {
+    const entry = ctx.store.getRawEntry(key);
+    if (entry?.type !== 'hash') return;
+    const setFields: Array<[string, string]> = [];
+    for (let i = 1; i < args.length; i += 2) {
+      const field = args[i];
+      const value = entry.fields.get(field);
+      if (value !== undefined) setFields.push([field, value]);
+    }
+    ctx.cluster.publishHashFieldChange(key, setFields, []);
+    return;
+  }
+
+  if (command === 'HDEL') {
+    const requested = args.slice(1);
+    const actuallyRemoved = prep.hashFieldsBefore ? requested.filter((field) => prep.hashFieldsBefore!.has(field)) : [];
+    if (actuallyRemoved.length > 0) ctx.cluster.publishHashFieldChange(key, [], actuallyRemoved);
+    return;
+  }
+
+  if (command === 'ZADD') {
+    const entry = ctx.store.getRawEntry(key);
+    if (entry?.type !== 'sortedset') return;
+    const setMembers: Array<[string, number]> = [];
+    for (let i = 2; i < args.length; i += 2) {
+      const member = args[i];
+      const score = entry.members.get(member);
+      if (score !== undefined) setMembers.push([member, score]);
+    }
+    ctx.cluster.publishZsetMemberChange(key, setMembers, []);
+    return;
+  }
+
+  if (command === 'ZREMRANGEBYSCORE') {
+    if (!prep.zsetMembersBefore) return;
+    const entry = ctx.store.getRawEntry(key);
+    const afterMembers = entry?.type === 'sortedset' ? entry.members : null;
+    const removed = Array.from(prep.zsetMembersBefore).filter((member) => !afterMembers?.has(member));
+    if (removed.length > 0) ctx.cluster.publishZsetMemberChange(key, [], removed);
+  }
 }
 
 export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcome {
@@ -89,20 +192,24 @@ export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcom
     return { command, frames: [subscriberModeError(command)], isError: true };
   }
 
+  // Everything captured here happens *before* running the handler, and is
+  // skipped entirely in standalone mode (the default/common case), where
+  // it would just be discarded — no reason to pay for existence checks or
+  // member-name snapshots when nothing downstream consumes them.
+  const replicatingWholeKey = ctx.cluster.haEnabled && cmdSpec.mutatedKeys !== undefined;
+  const replicatingFields = ctx.cluster.haEnabled && cmdSpec.fieldReplication !== undefined;
+
   // Candidate keys and their prior existence are captured *before* running
-  // the handler — a command like EXPIRE/HDEL/ZREMRANGEBYSCORE/DEL against
-  // a key this node doesn't have is a true no-op (nothing changed here),
-  // and must not replicate at all: doing so would broadcast a phantom
-  // "this key is deleted" fact that could clobber a real value another
-  // node already holds (e.g. one this node hasn't replicated in yet).
-  // SET/INCR/HSET/ZADD always leave the key existing afterward, so they
-  // still replicate correctly regardless of whether it existed before.
-  // Skipped entirely in standalone mode (the default/common case), where
-  // ctx.cluster.publishKeyChange is a no-op anyway — no reason to pay for
-  // an existence check per key on every command when nothing consumes it.
-  const replicating = ctx.cluster.haEnabled && cmdSpec.mutatedKeys !== undefined;
-  const candidateKeys = replicating ? cmdSpec.mutatedKeys!(args) : [];
-  const existedBefore = replicating ? candidateKeys.map((key) => ctx.store.exists(key)) : [];
+  // the handler — a command like EXPIRE/DEL against a key this node
+  // doesn't have is a true no-op (nothing changed here), and must not
+  // replicate at all: doing so would broadcast a phantom "this key is
+  // deleted" fact that could clobber a real value another node already
+  // holds (e.g. one this node hasn't replicated in yet). SET/INCR always
+  // leave the key existing afterward, so they still replicate correctly
+  // regardless of whether it existed before.
+  const candidateKeys = replicatingWholeKey ? cmdSpec.mutatedKeys!(args) : [];
+  const existedBefore = replicatingWholeKey ? candidateKeys.map((key) => ctx.store.exists(key)) : [];
+  const fieldPrep = replicatingFields ? prepareFieldReplication(ctx, command, args[0]) : null;
 
   const outcome = cmdSpec.handler(ctx, args);
   const isError = outcome.frames.some((f) => f.type === 'error');
@@ -115,7 +222,9 @@ export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcom
   if (!isError) {
     if (command === 'PUBLISH') {
       ctx.cluster.publishMessage(args[0], args[1]);
-    } else if (replicating) {
+    } else if (replicatingFields && fieldPrep) {
+      replicateFieldLevelMutation(ctx, command, args, fieldPrep);
+    } else if (replicatingWholeKey) {
       candidateKeys.forEach((key, i) => {
         if (existedBefore[i] || ctx.store.exists(key)) ctx.cluster.publishKeyChange(key);
       });

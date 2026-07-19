@@ -191,14 +191,19 @@ export class Store {
     return added;
   }
 
-  zremrangebyscore(key: string, min: ScoreBound, max: ScoreBound): number {
+  /**
+   * Returns the members actually removed (not just a count) — the
+   * cluster dispatcher needs the names to replicate this as a targeted
+   * per-member delete rather than re-shipping the whole sorted set.
+   */
+  zremrangebyscore(key: string, min: ScoreBound, max: ScoreBound): string[] {
     const entry = this.requireType<SortedSetEntry>(key, 'sortedset');
-    if (!entry) return 0;
-    let removed = 0;
+    if (!entry) return [];
+    const removed: string[] = [];
     for (const [member, score] of entry.members) {
       if (scoreInRange(score, min, max)) {
         entry.members.delete(member);
-        removed++;
+        removed.push(member);
       }
     }
     if (entry.members.size === 0) this.data.delete(key);
@@ -289,6 +294,43 @@ export class Store {
   /** Removes a key as a result of hydration or a replicated delete, without cascading further replication. */
   applyReplicatedDelete(key: string): void {
     this.data.delete(key);
+  }
+
+  /**
+   * Applies a replicated HSET — sets only the named fields, leaving any
+   * other fields on the hash untouched. This (not a whole-entry
+   * overwrite) is what lets two nodes concurrently HSET *different*
+   * fields of the same key without either write clobbering the other.
+   */
+  applyReplicatedHashFieldSet(key: string, fields: Array<[string, string]>): void {
+    const existing = this.data.get(key);
+    const entry: HashEntry = existing?.type === 'hash' ? existing : { type: 'hash', fields: new Map(), expiresAtMs: null };
+    if (entry !== existing) this.data.set(key, entry);
+    for (const [field, value] of fields) entry.fields.set(field, value);
+  }
+
+  /** Applies a replicated HDEL — removes only the named fields. Deletes the whole key once its last field is gone, matching local HDEL semantics. */
+  applyReplicatedHashFieldDelete(key: string, fields: string[]): void {
+    const entry = this.data.get(key);
+    if (!entry || entry.type !== 'hash') return;
+    for (const field of fields) entry.fields.delete(field);
+    if (entry.fields.size === 0) this.data.delete(key);
+  }
+
+  /** Applies a replicated ZADD — sets only the named members, leaving any other members on the sorted set untouched. */
+  applyReplicatedZsetMemberSet(key: string, members: Array<[string, number]>): void {
+    const existing = this.data.get(key);
+    const entry: SortedSetEntry = existing?.type === 'sortedset' ? existing : { type: 'sortedset', members: new Map(), expiresAtMs: null };
+    if (entry !== existing) this.data.set(key, entry);
+    for (const [member, score] of members) entry.members.set(member, score);
+  }
+
+  /** Applies a replicated ZREMRANGEBYSCORE — removes only the named members. Deletes the whole key once its last member is gone, matching local semantics. */
+  applyReplicatedZsetMemberDelete(key: string, members: string[]): void {
+    const entry = this.data.get(key);
+    if (!entry || entry.type !== 'sortedset') return;
+    for (const member of members) entry.members.delete(member);
+    if (entry.members.size === 0) this.data.delete(key);
   }
 }
 

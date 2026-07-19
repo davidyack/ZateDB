@@ -5,6 +5,7 @@ import { ClusterCoordinator } from '../../src/cluster/clusterCoordinator.js';
 import { NullDurableStore } from '../../src/cluster/durableStore.js';
 import { NullReplicationTransport } from '../../src/cluster/replicationTransport.js';
 import { FakeDurableStore, FakeReplicationHub } from '../helpers/fakeCluster.js';
+import { parseScoreBound } from '../../src/store/scoreRange.js';
 
 function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
   const start = Date.now();
@@ -61,7 +62,7 @@ describe('ClusterCoordinator HA mode: hydration', () => {
   it('loads every durable key into the local store before start() resolves', async () => {
     const durable = new FakeDurableStore();
     await durable.putKey('k1', { type: 'string', value: 'v1', expiresAtMs: null });
-    await durable.putKey('h1', { type: 'hash', fields: [['f', 'v']], expiresAtMs: null });
+    await durable.putKey('h1', { type: 'hash', fields: { f: 'v' }, expiresAtMs: null });
 
     const store = new Store(0);
     const pubsub = new PubSubRegistry();
@@ -147,6 +148,61 @@ describe('ClusterCoordinator HA mode: cross-node convergence', () => {
     clusterA.publishKeyChange('k');
     await waitFor(() => storeB.get('k') === null);
     expect(durable.keys.has('k')).toBe(false);
+  });
+
+  it('two nodes setting DIFFERENT fields of the same hash concurrently both survive (per-field replication)', async () => {
+    // Regression: whole-entry replication would have whichever node's
+    // full-hash snapshot landed last silently discard the other node's
+    // field. Field-level replication ships only the touched field, so
+    // both survive regardless of arrival order.
+    storeA.hset('presence:room1', [['user1', 'online']]);
+    clusterA.publishHashFieldChange('presence:room1', [['user1', 'online']], []);
+
+    storeB.hset('presence:room1', [['user2', 'online']]);
+    clusterB.publishHashFieldChange('presence:room1', [['user2', 'online']], []);
+
+    await waitFor(() => storeA.hgetall('presence:room1').length === 2 && storeB.hgetall('presence:room1').length === 2);
+    expect(new Map(storeA.hgetall('presence:room1'))).toEqual(
+      new Map([
+        ['user1', 'online'],
+        ['user2', 'online'],
+      ]),
+    );
+    expect(new Map(storeB.hgetall('presence:room1'))).toEqual(new Map(storeA.hgetall('presence:room1')));
+  });
+
+  it('two nodes adding DIFFERENT members of the same sorted set concurrently both survive (per-field replication)', async () => {
+    storeA.zadd('guard:w1', [[1, 'evt-a']]);
+    clusterA.publishZsetMemberChange('guard:w1', [['evt-a', 1]], []);
+
+    storeB.zadd('guard:w1', [[2, 'evt-b']]);
+    clusterB.publishZsetMemberChange('guard:w1', [['evt-b', 2]], []);
+
+    const fullRange = () => [parseScoreBound('-inf'), parseScoreBound('+inf')] as const;
+    await waitFor(() => storeA.zcount('guard:w1', ...fullRange()) === 2);
+    await waitFor(() => storeB.zcount('guard:w1', ...fullRange()) === 2);
+  });
+
+  it('replicates a partial HDEL as a field delete, leaving the rest of the hash intact on the other node', async () => {
+    storeA.hset('presence:room2', [
+      ['user1', 'online'],
+      ['user2', 'online'],
+    ]);
+    clusterA.publishHashFieldChange(
+      'presence:room2',
+      [
+        ['user1', 'online'],
+        ['user2', 'online'],
+      ],
+      [],
+    );
+    await waitFor(() => storeB.hgetall('presence:room2').length === 2);
+
+    storeA.hdel('presence:room2', ['user1']);
+    clusterA.publishHashFieldChange('presence:room2', [], ['user1']);
+    await waitFor(() => storeB.hgetall('presence:room2').length === 1);
+    expect(storeB.hgetall('presence:room2')).toEqual([['user2', 'online']]);
+    expect(durable.keys.get('presence:room2')).toEqual({ type: 'hash', fields: { user2: 'online' }, expiresAtMs: null });
   });
 
   it('does not re-apply its own broadcast back onto the originating node', async () => {
