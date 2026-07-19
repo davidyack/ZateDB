@@ -21,6 +21,11 @@ export class FakeDurableStore implements DurableStore {
   async deleteKey(key: string): Promise<void> {
     this.keys.delete(key);
   }
+  async putTtl(key: string, expiresAtMs: number | null): Promise<void> {
+    const existing = this.keys.get(key);
+    if (existing === undefined) return; // EXPIRE can't create a key
+    this.keys.set(key, { ...existing, expiresAtMs });
+  }
   async putHashFields(key: string, fields: Array<[string, string]>): Promise<void> {
     const existing = this.keys.get(key);
     const base = existing?.type === 'hash' ? existing.fields : {};

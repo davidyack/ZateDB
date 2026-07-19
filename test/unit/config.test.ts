@@ -39,6 +39,17 @@ describe('loadConfig', () => {
     const config = loadConfig({ RESP_PORT: 'not-a-port' } as unknown as NodeJS.ProcessEnv);
     expect(config.respPort).toBe(6379);
   });
+
+  it('parses REQUIRE_HA as a strict boolean (only literal "true" enables it)', () => {
+    expect(loadConfig({} as NodeJS.ProcessEnv).requireHa).toBe(false);
+    expect(loadConfig({ REQUIRE_HA: 'true' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(true);
+    expect(loadConfig({ REQUIRE_HA: 'TRUE' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(true);
+    // Anything that isn't "true" leaves it off — a fat-fingered value must
+    // never accidentally *relax* the guard, but also never silently enable it.
+    expect(loadConfig({ REQUIRE_HA: 'false' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(false);
+    expect(loadConfig({ REQUIRE_HA: '1' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(false);
+    expect(loadConfig({ REQUIRE_HA: '' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(false);
+  });
 });
 
 describe('isHaConfigured', () => {

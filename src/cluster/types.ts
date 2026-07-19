@@ -18,7 +18,7 @@ export type EntrySnapshot =
   | { type: 'hash'; fields: Record<string, string>; expiresAtMs: number | null }
   | { type: 'sortedset'; members: Record<string, number>; expiresAtMs: number | null };
 
-export type ReplicationEventKind = 'upsert' | 'delete' | 'publish' | 'hashField' | 'zsetMember';
+export type ReplicationEventKind = 'upsert' | 'delete' | 'ttl' | 'publish' | 'hashField' | 'zsetMember';
 
 /**
  * A single fact broadcast over the replication transport: "key X is now
@@ -33,8 +33,16 @@ export interface ReplicationEvent {
   seq: number;
   timestampMs: number;
   key?: string;
-  /** For 'upsert' — the whole post-mutation entry (SET/INCR/EXPIRE/PEXPIRE). */
+  /** For 'upsert' — the whole post-mutation entry (SET/INCR). */
   entry?: EntrySnapshot;
+  /**
+   * For 'ttl' — the key's new absolute expiry (EXPIRE/PEXPIRE). Replicated
+   * on its own, not folded into a whole-entry 'upsert', so an EXPIRE on a
+   * hash/sorted set doesn't ship (and overwrite peers with) a whole-entry
+   * snapshot that would clobber field/member writes those peers have
+   * applied but this node hasn't received yet.
+   */
+  expiresAtMs?: number | null;
   channel?: string;
   message?: string;
   /** For 'hashField' — field/value pairs that were set (HSET). */

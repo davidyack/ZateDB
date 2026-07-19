@@ -37,7 +37,7 @@ param cosmosConnectionStringSecretUri string
 @description('Cosmos DB database name — must already exist')
 param cosmosDatabaseName string = 'backendcache'
 
-@description('Cosmos DB container for key state, partitioned on /key — must already exist')
+@description('Cosmos DB container for key state, partitioned on /key — must already exist. Enable DefaultTimeToLive on it (e.g. -1) so Cosmos evicts expired keys via each document\'s ttl property and the container doesn\'t grow unbounded — see docs/high-availability.md.')
 param cosmosKeysContainerName string = 'keys'
 
 @description('Cosmos DB container for node heartbeat/topology snapshots, partitioned on /nodeId — must already exist')
@@ -96,6 +96,13 @@ resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'RESP_PORT', value: '6379' }
             { name: 'HEALTH_PORT', value: '8081' }
             { name: 'ADMIN_PORT', value: '8082' }
+            // At minReplicas >= 2, a partial/missing HA config must never
+            // silently fall back to standalone: that would put several
+            // independent, non-replicating nodes behind one load balancer
+            // (split-brain, divergent per-connection keyspaces). REQUIRE_HA
+            // makes that a hard startup failure so the restart policy
+            // surfaces it loudly. See docs/high-availability.md.
+            { name: 'REQUIRE_HA', value: 'true' }
             // NODE_ID is deliberately left unset: cluster/nodeId.ts falls
             // back to CONTAINER_APP_REPLICA_NAME, which Container Apps sets
             // automatically and uniquely per replica.

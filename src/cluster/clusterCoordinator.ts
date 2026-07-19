@@ -7,6 +7,20 @@ import { entryToSnapshot, snapshotToEntry } from './snapshot.js';
 import { redactKey } from '../telemetry/commandTelemetry.js';
 import { errorMessage, logger } from '../logger.js';
 
+/**
+ * A queued replication side-effect for one key. `coalesceClass` groups
+ * writes that fully supersede one another: two consecutive `'whole'` writes
+ * (SET/INCR/DEL — each ships the key's entire post-state) collapse to the
+ * later one, and two consecutive `'ttl'` writes likewise. Field/member
+ * deltas use `'field'` and never coalesce (each carries a distinct
+ * field/member change that a later one doesn't contain), and mixed classes
+ * never coalesce across each other, preserving order.
+ */
+interface ReplicationTask {
+  coalesceClass: 'whole' | 'ttl' | 'field';
+  run: () => Promise<void>;
+}
+
 export interface ClusterCoordinatorDeps {
   store: Store;
   pubsub: PubSubRegistry;
@@ -17,6 +31,13 @@ export interface ClusterCoordinatorDeps {
   heartbeatIntervalMs: number;
   /** A peer's heartbeat older than this is treated as dead and dropped from cluster views. */
   nodeStaleMs: number;
+  /**
+   * Keyspace byte ceiling (config.maxMemoryBytes) used to bound startup
+   * hydration: loading a Cosmos keyspace that grew past what this node can
+   * hold would OOM it into a restart loop, so hydration stops (with a loud
+   * log) once the loaded estimate crosses this. 0 or unset disables the bound.
+   */
+  maxMemoryBytes?: number;
   connectionCount(): number;
   commandsTotal(): number;
 }
@@ -51,7 +72,14 @@ export class ClusterCoordinator {
   private seq = 0;
   private hydratedFlag = false;
   private inFlight = new Set<Promise<unknown>>();
-  private lastPublishByKey = new Map<string, Promise<void>>();
+  /**
+   * Per-key FIFO of replication tasks not yet started, plus the set of keys
+   * whose FIFO is currently being drained. Same-key writes stay ordered
+   * (drained one at a time); consecutive whole-key absolute writes for a
+   * key coalesce to the latest queued one (see enqueueForKey).
+   */
+  private replicationQueue = new Map<string, ReplicationTask[]>();
+  private draining = new Set<string>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly deps: ClusterCoordinatorDeps) {
@@ -94,11 +122,47 @@ export class ClusterCoordinator {
 
   private async hydrate(): Promise<void> {
     const snapshots = await this.deps.durable.loadAll();
+    const now = Date.now();
+    const ceiling = this.deps.maxMemoryBytes ?? 0;
+    let loaded = 0;
+    let skippedExpired = 0;
+    let stoppedAtCeiling = false;
     for (const { key, entry } of snapshots) {
+      // Defence in depth against a durable store that hasn't (yet) dropped
+      // expired documents: never hydrate a key that's already dead, so a
+      // restart doesn't resurrect it or pay to hold it.
+      if (entry.expiresAtMs !== null && entry.expiresAtMs <= now) {
+        skippedExpired++;
+        continue;
+      }
+      // A Cosmos keyspace larger than this node can hold would OOM it into a
+      // crash loop mid-hydration. Stop loading (serving the partial set is
+      // strictly better than never becoming ready) and log loudly so the
+      // undersized-node / oversized-keyspace mismatch is visible.
+      if (ceiling > 0 && this.deps.store.memoryBytesEstimate() >= ceiling) {
+        stoppedAtCeiling = true;
+        break;
+      }
       this.deps.store.applyReplicatedUpsert(key, snapshotToEntry(entry));
+      loaded++;
     }
     this.hydratedFlag = true;
-    logger.info('cluster.hydrated', { nodeId: this.nodeId, keyCount: snapshots.length });
+    logger.info('cluster.hydrated', {
+      nodeId: this.nodeId,
+      keyCount: loaded,
+      skippedExpired,
+      approxBytes: this.deps.store.memoryBytesEstimate(),
+      stoppedAtCeiling,
+    });
+    if (stoppedAtCeiling) {
+      logger.warn('cluster.hydration_truncated', {
+        nodeId: this.nodeId,
+        hint: 'durable keyspace exceeds MAX_MEMORY_BYTES; hydrated a partial set — increase node memory or shard the keyspace',
+        maxMemoryBytes: ceiling,
+        loaded,
+        totalDocuments: snapshots.length,
+      });
+    }
   }
 
   /**
@@ -112,7 +176,29 @@ export class ClusterCoordinator {
   publishKeyChange(key: string): void {
     if (!this.haEnabled) return;
     const entry = this.deps.store.getRawEntry(key);
-    this.enqueueForKey(key, () => this.doPublishKeyChange(key, entry));
+    // 'whole': the snapshot captured here is the key's entire post-state, so
+    // an earlier still-queued whole-key write for the same key is redundant
+    // and coalesces away (N rapid INCRs on a hot counter -> 1 durable write).
+    this.enqueueForKey(key, 'whole', () => this.doPublishKeyChange(key, entry));
+  }
+
+  /**
+   * Call after a successful EXPIRE/PEXPIRE that actually changed a key's
+   * TTL. Replicates just the new expiry (not a whole-entry snapshot), so an
+   * EXPIRE on a hash/sorted set never overwrites field/member writes a peer
+   * has that this node hasn't received yet. See ReplicationEvent.expiresAtMs
+   * and Store.applyReplicatedTtl.
+   */
+  publishTtlChange(key: string, expiresAtMs: number | null): void {
+    if (!this.haEnabled) return;
+    this.enqueueForKey(key, 'ttl', () => this.doPublishTtlChange(key, expiresAtMs));
+  }
+
+  private async doPublishTtlChange(key: string, expiresAtMs: number | null): Promise<void> {
+    await Promise.all([
+      this.deps.durable.putTtl(key, expiresAtMs),
+      this.deps.transport.publish(this.makeEvent({ kind: 'ttl', key, expiresAtMs })),
+    ]);
   }
 
   private async doPublishKeyChange(key: string, entry: ReturnType<Store['getRawEntry']>): Promise<void> {
@@ -141,7 +227,7 @@ export class ClusterCoordinator {
    */
   publishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): void {
     if (!this.haEnabled || (setFields.length === 0 && deletedFields.length === 0)) return;
-    this.enqueueForKey(key, () => this.doPublishHashFieldChange(key, setFields, deletedFields));
+    this.enqueueForKey(key, 'field', () => this.doPublishHashFieldChange(key, setFields, deletedFields));
   }
 
   private async doPublishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): Promise<void> {
@@ -155,7 +241,7 @@ export class ClusterCoordinator {
   /** Same idea as publishHashFieldChange, for ZADD/ZREMRANGEBYSCORE — see that method's doc comment. */
   publishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): void {
     if (!this.haEnabled || (setMembers.length === 0 && deletedMembers.length === 0)) return;
-    this.enqueueForKey(key, () => this.doPublishZsetMemberChange(key, setMembers, deletedMembers));
+    this.enqueueForKey(key, 'field', () => this.doPublishZsetMemberChange(key, setMembers, deletedMembers));
   }
 
   private async doPublishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): Promise<void> {
@@ -177,24 +263,61 @@ export class ClusterCoordinator {
   }
 
   /**
-   * Chains `task` behind any prior publish for the same key (not run
-   * concurrently): otherwise two independent fire-and-forget network
-   * round trips for e.g. two rapid SETs (or a SET and a field change) on
-   * the same key could complete out of order and leave the cluster
-   * converged on stale state.
+   * Queues `task` behind any prior publish for the same key (drained one at
+   * a time, never concurrently): otherwise two independent fire-and-forget
+   * network round trips for e.g. two rapid SETs (or a SET and a field
+   * change) on the same key could complete out of order and leave the
+   * cluster converged on stale state.
+   *
+   * Consecutive *not-yet-started* tasks of the same coalesceClass collapse
+   * to the latest: a whole-key write ('whole') or TTL write ('ttl') fully
+   * supersedes an earlier queued write of the same class (they each carry
+   * the key's complete post-state for that aspect), so N rapid INCRs on a
+   * hot counter cost one in-flight write plus one queued write instead of
+   * N. Field/member deltas ('field') never coalesce — each carries a
+   * distinct change a later one doesn't contain — and differing classes
+   * never coalesce across each other, so ordering across a SET/EXPIRE/HSET
+   * mix is preserved.
    */
-  private enqueueForKey(key: string, task: () => Promise<void>): void {
-    const prior = this.lastPublishByKey.get(key) ?? Promise.resolve();
-    const chained = prior.then(() =>
-      task().catch((err) => {
-        logger.warn('cluster.replicate_failed', { key: redactKey(key), error: errorMessage(err) });
-      }),
-    );
-    this.lastPublishByKey.set(key, chained);
-    void chained.finally(() => {
-      if (this.lastPublishByKey.get(key) === chained) this.lastPublishByKey.delete(key);
-    });
-    this.track(chained);
+  private enqueueForKey(key: string, coalesceClass: ReplicationTask['coalesceClass'], run: () => Promise<void>): void {
+    let queue = this.replicationQueue.get(key);
+    if (queue === undefined) {
+      queue = [];
+      this.replicationQueue.set(key, queue);
+    }
+    const tail = queue[queue.length - 1];
+    if (tail !== undefined && coalesceClass !== 'field' && tail.coalesceClass === coalesceClass) {
+      // The tail hasn't started yet (the running task was already shifted
+      // off the front), so replacing it drops a redundant write, never an
+      // in-flight one.
+      queue[queue.length - 1] = { coalesceClass, run };
+    } else {
+      queue.push({ coalesceClass, run });
+    }
+    if (!this.draining.has(key)) this.startDraining(key);
+  }
+
+  private startDraining(key: string): void {
+    this.draining.add(key);
+    const drained = (async () => {
+      const queue = this.replicationQueue.get(key);
+      if (queue === undefined) return;
+      // Shift-and-run: tasks enqueued while an earlier one awaits are picked
+      // up by this same loop (and may coalesce with the queue tail first).
+      while (queue.length > 0) {
+        const task = queue.shift() as ReplicationTask;
+        try {
+          await task.run();
+        } catch (err) {
+          logger.warn('cluster.replicate_failed', { key: redactKey(key), error: errorMessage(err) });
+        }
+      }
+      // No await between the emptiness check above and this cleanup, so a
+      // synchronous enqueue can't slip a task in after we decide to stop.
+      this.replicationQueue.delete(key);
+      this.draining.delete(key);
+    })();
+    this.track(drained);
   }
 
   private applyRemoteEvent(event: ReplicationEvent): void {
@@ -203,6 +326,8 @@ export class ClusterCoordinator {
         this.deps.store.applyReplicatedUpsert(event.key, snapshotToEntry(event.entry));
       } else if (event.kind === 'delete' && event.key !== undefined) {
         this.deps.store.applyReplicatedDelete(event.key);
+      } else if (event.kind === 'ttl' && event.key !== undefined && event.expiresAtMs !== undefined) {
+        this.deps.store.applyReplicatedTtl(event.key, event.expiresAtMs);
       } else if (event.kind === 'publish' && event.channel !== undefined && event.message !== undefined) {
         this.deps.pubsub.publish(event.channel, event.message);
       } else if (event.kind === 'hashField' && event.key !== undefined) {
@@ -228,13 +353,16 @@ export class ClusterCoordinator {
 
   private async heartbeat(): Promise<void> {
     try {
-      const storeStats = this.deps.store.stats();
+      // Fast O(1) counters, not stats() — the heartbeat fires every ~10 s
+      // and must not walk the whole keyspace (and, in HA, on every node) to
+      // report a key breakdown.
+      const keyCounts = this.deps.store.keyCounts();
       const topology = this.deps.pubsub.topology();
       const snapshot: NodeSnapshot = {
         nodeId: this.nodeId,
         lastHeartbeatMs: Date.now(),
         connectionCount: this.deps.connectionCount(),
-        keyCounts: storeStats.keyCounts,
+        keyCounts,
         commandsTotal: this.deps.commandsTotal(),
         subscriptions: topology,
       };

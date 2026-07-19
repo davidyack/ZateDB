@@ -44,6 +44,15 @@ export class Store {
    * silently agree on a wrong number.
    */
   private memoryBytes = 0;
+  /**
+   * Incremental per-type key counts, maintained in put()/remove() so the
+   * cluster heartbeat (every 10 s) and any other hot caller can read the
+   * key breakdown in O(1) instead of walking the whole keyspace. Like
+   * memoryBytes this can transiently include expired-but-not-yet-swept
+   * keys; the admin /stats view recomputes exactly (excluding expired) as
+   * an independent cross-check.
+   */
+  private keyCountByType: Record<EntryTypeName, number> = { string: 0, hash: 0, sortedset: 0 };
 
   constructor(private readonly sweepIntervalMs: number = DEFAULT_SWEEP_INTERVAL_MS, limits: StoreLimits = {}) {
     this.maxKeys = limits.maxKeys ?? 0;
@@ -93,19 +102,24 @@ export class Store {
     if (this.maxMemoryBytes > 0 && this.memoryBytes >= this.maxMemoryBytes) throw new OutOfMemoryError();
   }
 
-  /** Inserts or replaces a key, keeping the byte estimate exact. */
+  /** Inserts or replaces a key, keeping the byte estimate and per-type key counts exact. */
   private put(key: string, entry: Entry): void {
     const prev = this.data.get(key);
-    if (prev !== undefined) this.memoryBytes -= estimateEntrySize(key, prev);
+    if (prev !== undefined) {
+      this.memoryBytes -= estimateEntrySize(key, prev);
+      this.keyCountByType[prev.type]--;
+    }
     this.data.set(key, entry);
     this.memoryBytes += estimateEntrySize(key, entry);
+    this.keyCountByType[entry.type]++;
   }
 
-  /** Deletes a key if present, keeping the byte estimate exact. Returns whether it existed. */
+  /** Deletes a key if present, keeping the byte estimate and per-type key counts exact. Returns whether it existed. */
   private remove(key: string): boolean {
     const prev = this.data.get(key);
     if (prev === undefined) return false;
     this.memoryBytes -= estimateEntrySize(key, prev);
+    this.keyCountByType[prev.type]--;
     this.data.delete(key);
     return true;
   }
@@ -288,6 +302,27 @@ export class Store {
 
   // ---- admin / observability -----------------------------------------------
 
+  /**
+   * O(1) keyspace byte estimate straight off the running counter — for hot
+   * observers (the metrics gauge, scraped per collection) that need a
+   * number every few seconds and shouldn't pay an O(keyspace) walk for it.
+   * May transiently count expired-but-unswept keys; stats() is the exact
+   * (walked, expiry-excluding) cross-check for the admin view.
+   */
+  memoryBytesEstimate(): number {
+    return this.memoryBytes;
+  }
+
+  /**
+   * O(1) per-type key counts straight off the running counters — used by
+   * the cluster heartbeat (every 10 s) so it doesn't walk the whole
+   * keyspace just to report a breakdown. Same expired-key caveat as
+   * memoryBytesEstimate().
+   */
+  keyCounts(): Record<EntryTypeName, number> {
+    return { ...this.keyCountByType };
+  }
+
   stats(): StoreStats {
     const keyCounts: Record<EntryTypeName, number> = { string: 0, hash: 0, sortedset: 0 };
     let memoryEstimateBytes = 0;
@@ -363,6 +398,22 @@ export class Store {
   }
 
   /**
+   * Applies a replicated EXPIRE/PEXPIRE — sets only the key's TTL, leaving
+   * its value/fields/members untouched. Replicating a TTL change this way
+   * (rather than as a whole-entry upsert) is what keeps a concurrent
+   * field-granular write on the same hash/sorted set from being clobbered
+   * by a peer's EXPIRE. A no-op if the key doesn't exist locally: EXPIRE
+   * can't create a key, so there's nothing to attach a TTL to (the origin
+   * node's own EXPIRE already returned 0 in that case and wouldn't have
+   * replicated at all).
+   */
+  applyReplicatedTtl(key: string, expiresAtMs: number | null): void {
+    const entry = this.getLive(key);
+    if (entry === undefined) return;
+    entry.expiresAtMs = expiresAtMs;
+  }
+
+  /**
    * Applies a replicated HSET — sets only the named fields, leaving any
    * other fields on the hash untouched. This (not a whole-entry
    * overwrite) is what lets two nodes concurrently HSET *different*
@@ -373,12 +424,16 @@ export class Store {
    */
   applyReplicatedHashFieldSet(key: string, fields: Array<[string, string]>): void {
     const existing = this.data.get(key);
-    const reuse = existing?.type === 'hash';
-    const before = existing ? estimateEntrySize(key, existing) : 0;
-    const entry: HashEntry = reuse ? (existing as HashEntry) : { type: 'hash', fields: new Map(), expiresAtMs: null };
-    for (const [field, value] of fields) entry.fields.set(field, value);
-    this.data.set(key, entry);
-    this.memoryBytes += estimateEntrySize(key, entry) - before;
+    if (existing?.type === 'hash') {
+      const before = estimateEntrySize(key, existing);
+      for (const [field, value] of fields) existing.fields.set(field, value);
+      this.memoryBytes += estimateEntrySize(key, existing) - before;
+      return;
+    }
+    // New key (or a type change from a divergent peer): route through put()
+    // so the byte estimate and per-type key counts stay exact.
+    const entry: HashEntry = { type: 'hash', fields: new Map(fields), expiresAtMs: null };
+    this.put(key, entry);
   }
 
   /** Applies a replicated HDEL — removes only the named fields. Deletes the whole key once its last field is gone, matching local HDEL semantics. */
@@ -402,12 +457,16 @@ export class Store {
    */
   applyReplicatedZsetMemberSet(key: string, members: Array<[string, number]>): void {
     const existing = this.data.get(key);
-    const reuse = existing?.type === 'sortedset';
-    const before = existing ? estimateEntrySize(key, existing) : 0;
-    const entry: SortedSetEntry = reuse ? (existing as SortedSetEntry) : { type: 'sortedset', members: new Map(), expiresAtMs: null };
-    for (const [member, score] of members) entry.members.set(member, score);
-    this.data.set(key, entry);
-    this.memoryBytes += estimateEntrySize(key, entry) - before;
+    if (existing?.type === 'sortedset') {
+      const before = estimateEntrySize(key, existing);
+      for (const [member, score] of members) existing.members.set(member, score);
+      this.memoryBytes += estimateEntrySize(key, existing) - before;
+      return;
+    }
+    // New key (or a type change from a divergent peer): route through put()
+    // so the byte estimate and per-type key counts stay exact.
+    const entry: SortedSetEntry = { type: 'sortedset', members: new Map(members), expiresAtMs: null };
+    this.put(key, entry);
   }
 
   /** Applies a replicated ZREMRANGEBYSCORE — removes only the named members. Deletes the whole key once its last member is gone, matching local semantics. */

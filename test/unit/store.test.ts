@@ -171,3 +171,86 @@ describe('Store sorted sets', () => {
     expect(store.exists('z')).toBe(false);
   });
 });
+
+describe('Store fast counters (memoryBytesEstimate / keyCounts)', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('tracks per-type key counts incrementally as keys are created and removed', () => {
+    expect(store.keyCounts()).toEqual({ string: 0, hash: 0, sortedset: 0 });
+    store.set('s1', 'v');
+    store.set('s2', 'v');
+    store.hset('h1', [['f', 'v']]);
+    store.zadd('z1', [[1, 'm']]);
+    expect(store.keyCounts()).toEqual({ string: 2, hash: 1, sortedset: 1 });
+
+    store.del(['s1']);
+    store.hdel('h1', ['f']); // empties the hash -> whole key removed
+    expect(store.keyCounts()).toEqual({ string: 1, hash: 0, sortedset: 1 });
+  });
+
+  it('keyCounts() agrees with the independent stats() walk after a mix of writes', () => {
+    store.set('a', 'x');
+    store.incr('counter');
+    store.hset('h', [['f1', 'v'], ['f2', 'v']]);
+    store.zadd('z', [[1, 'm']]);
+    store.set('a', 'y'); // in-place replace, not a new key
+    expect(store.keyCounts()).toEqual(store.stats().keyCounts);
+  });
+
+  it('memoryBytesEstimate() moves with writes and matches the walked estimate', () => {
+    expect(store.memoryBytesEstimate()).toBe(0);
+    store.set('k', 'value');
+    const afterSet = store.memoryBytesEstimate();
+    expect(afterSet).toBeGreaterThan(0);
+    expect(afterSet).toBe(store.stats().memoryEstimateBytes);
+
+    store.del(['k']);
+    expect(store.memoryBytesEstimate()).toBe(0);
+  });
+
+  it('counts stay exact when a replicated field-set creates a brand-new key', () => {
+    store.applyReplicatedHashFieldSet('h', [['f', 'v']]);
+    store.applyReplicatedZsetMemberSet('z', [['m', 1]]);
+    expect(store.keyCounts()).toEqual({ string: 0, hash: 1, sortedset: 1 });
+    expect(store.keyCounts()).toEqual(store.stats().keyCounts);
+  });
+});
+
+describe('Store.applyReplicatedTtl', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('sets a TTL on an existing key without touching its value', () => {
+    store.set('k', 'v');
+    const at = Date.now() + 60_000;
+    store.applyReplicatedTtl('k', at);
+    expect(store.get('k')).toBe('v');
+    const detail = store.getKeyDetail('k');
+    expect(detail?.info.ttlMsRemaining).not.toBeNull();
+  });
+
+  it('leaves other hash fields intact (TTL-only, never a whole-entry overwrite)', () => {
+    store.hset('h', [['f1', 'v1'], ['f2', 'v2']]);
+    store.applyReplicatedTtl('h', Date.now() + 60_000);
+    expect(new Map(store.hgetall('h'))).toEqual(new Map([['f1', 'v1'], ['f2', 'v2']]));
+  });
+
+  it('is a no-op for a key that does not exist locally (EXPIRE cannot create a key)', () => {
+    store.applyReplicatedTtl('absent', Date.now() + 60_000);
+    expect(store.exists('absent')).toBe(false);
+    expect(store.keyCounts()).toEqual({ string: 0, hash: 0, sortedset: 0 });
+  });
+
+  it('can clear a TTL by passing null', () => {
+    store.set('k', 'v', { exSeconds: 60 });
+    store.applyReplicatedTtl('k', null);
+    expect(store.getKeyDetail('k')?.info.ttlMsRemaining).toBeNull();
+  });
+});

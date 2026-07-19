@@ -43,6 +43,15 @@ export interface ServerConfig {
   nodeStaleMs: number;
   /** How long startup (Cosmos DB / Service Bus connect + hydration) may take before failing fast instead of hanging indefinitely. */
   clusterStartupTimeoutMs: number;
+  /**
+   * When true, the process refuses to start in standalone mode: HA must be
+   * fully configured (both Cosmos DB and Service Bus) or startup fails.
+   * Set in the multi-replica Bicep deployment so a typo'd env var or a
+   * missed secret can't silently leave 2+ non-replicating nodes behind one
+   * connection-spraying load balancer — the split-brain-by-misconfiguration
+   * failure the single-replica invariant used to make impossible.
+   */
+  requireHa: boolean;
 }
 
 function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -88,7 +97,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     heartbeatIntervalMs: intFromEnv(env, 'HEARTBEAT_INTERVAL_MS', 10_000),
     nodeStaleMs: intFromEnv(env, 'NODE_STALE_MS', 30_000),
     clusterStartupTimeoutMs: intFromEnv(env, 'CLUSTER_STARTUP_TIMEOUT_MS', 30_000),
+    requireHa: boolExact(env.REQUIRE_HA, false),
   };
+}
+
+/** Parses a strict boolean env flag: only the literal string 'true' (case-insensitive) enables it. */
+function boolExact(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined || raw === '') return fallback;
+  return raw.toLowerCase() === 'true';
 }
 
 export function hasDurableStoreConfigured(config: ServerConfig): boolean {

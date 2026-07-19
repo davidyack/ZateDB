@@ -157,6 +157,65 @@ describe('dispatcher cluster replication correctness', () => {
     expect(durable.keys.has('to-delete')).toBe(false);
   });
 
+  it('replicates EXPIRE as a TTL-only update, preserving hash fields in the durable store', async () => {
+    // EXPIRE/PEXPIRE must NOT ship a whole-entry snapshot: doing so would
+    // overwrite peers with this node's entire entry, clobbering field/member
+    // writes they hold but this node hasn't received. The durable snapshot
+    // must keep its fields and just gain an expiry.
+    dispatch(ctx, ['HSET', 'h', 'f1', 'v1', 'f2', 'v2']);
+    await cluster.drain(500);
+    dispatch(ctx, ['EXPIRE', 'h', '60']);
+    await cluster.drain(500);
+
+    const snap = durable.keys.get('h');
+    expect(snap?.type).toBe('hash');
+    if (snap?.type === 'hash') {
+      expect(snap.fields).toEqual({ f1: 'v1', f2: 'v2' }); // fields survive
+      expect(snap.expiresAtMs).not.toBeNull(); // and the TTL was applied
+    }
+  });
+
+  it('does not replicate a no-op EXPIRE against a key this node never had', async () => {
+    dispatch(ctx, ['EXPIRE', 'never-existed', '60']);
+    await cluster.drain(500);
+    expect(durable.keys.size).toBe(0);
+  });
+
+  it('does not replicate an EXPIRE whose flag condition was not met (reply :0)', async () => {
+    dispatch(ctx, ['SET', 'k', 'v']); // no TTL yet
+    await cluster.drain(500);
+    // XX requires an existing TTL; there is none, so this changes nothing.
+    dispatch(ctx, ['EXPIRE', 'k', '60', 'XX']);
+    await cluster.drain(500);
+    // The durable snapshot is still the plain SET (no expiry patched in).
+    expect(durable.keys.get('k')).toEqual({ type: 'string', value: 'v', expiresAtMs: null });
+  });
+
+  it('coalesces a burst of same-key whole-key writes into far fewer durable writes', async () => {
+    // Hold the first Cosmos write open so the rest of the burst queues
+    // behind it, then confirm the queued writes collapsed to just the
+    // latest one (one in-flight + one coalesced), not all five.
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const originalPutKey = durable.putKey.bind(durable);
+    let putCalls = 0;
+    durable.putKey = async (key, entry) => {
+      putCalls++;
+      if (putCalls === 1) await firstGate;
+      await originalPutKey(key, entry);
+    };
+
+    for (let i = 0; i < 5; i++) dispatch(ctx, ['INCR', 'hot-counter']);
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let the burst queue up behind the gated first write
+    releaseFirst();
+    await cluster.drain(1000);
+
+    expect(putCalls).toBe(2); // first (gated) + one coalesced latest, not 5
+    expect(durable.keys.get('hot-counter')).toEqual({ type: 'string', value: '5', expiresAtMs: null });
+  });
+
   it('replicates sequential writes to the same key in call order, even if their network round trips would otherwise finish out of order', async () => {
     // Regression: two independent fire-and-forget publishes for the same
     // key raced on their own Cosmos/Service Bus round trips, so a slower
@@ -258,5 +317,28 @@ describe('HDEL only replicates fields that actually existed on this node (two no
     expect(storeB.hgetall('h')).toEqual([['b', 'v2']]); // node B's field survives
     expect(storeA.hgetall('h')).toEqual([['b', 'v2']]); // and converges onto node A too, once B's HSET arrives
     expect(durable.keys.get('h')).toEqual({ type: 'hash', fields: { b: 'v2' }, expiresAtMs: null });
+  });
+
+  it("an EXPIRE on one node doesn't clobber a field the other node wrote but hasn't replicated yet", async () => {
+    // The core of finding #2: EXPIRE used to replicate as a whole-entry
+    // upsert. Node A snapshotting its entire hash and shipping it on EXPIRE
+    // would overwrite node B's copy, destroying field 'b' (which A hadn't
+    // received yet). TTL-only replication ships just the expiry, so 'b'
+    // survives.
+    dispatch(ctxA, ['HSET', 'h', 'a', 'v1']); // A has 'a'
+    dispatch(ctxB, ['HSET', 'h', 'b', 'v2']); // B has 'b'; not delivered to A yet (no await has run)
+    dispatch(ctxA, ['EXPIRE', 'h', '600']); // A expires the hash while it only knows about 'a'
+
+    await Promise.all([clusterA.drain(1000), clusterB.drain(1000)]);
+
+    // Both fields survive everywhere, and the TTL landed.
+    expect(new Map(storeA.hgetall('h'))).toEqual(new Map([['a', 'v1'], ['b', 'v2']]));
+    expect(new Map(storeB.hgetall('h'))).toEqual(new Map([['a', 'v1'], ['b', 'v2']]));
+    const snap = durable.keys.get('h');
+    expect(snap?.type).toBe('hash');
+    if (snap?.type === 'hash') {
+      expect(snap.fields).toEqual({ a: 'v1', b: 'v2' });
+      expect(snap.expiresAtMs).not.toBeNull();
+    }
   });
 });

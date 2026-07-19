@@ -21,6 +21,14 @@ export interface DurableStore {
   deleteKey(key: string): Promise<void>;
 
   /**
+   * Updates only a key's TTL (EXPIRE/PEXPIRE) without rewriting its
+   * value/fields/members — the durable-store counterpart of
+   * Store.applyReplicatedTtl, so a TTL change never clobbers concurrently
+   * persisted field/member writes. A no-op if the key doesn't exist.
+   */
+  putTtl(key: string, expiresAtMs: number | null): Promise<void>;
+
+  /**
    * Sets specific hash fields without touching any other field on the
    * same key — used for HSET, so two nodes setting *different* fields of
    * the same hash concurrently don't clobber each other the way a
@@ -59,6 +67,8 @@ export class NullDurableStore implements DurableStore {
   async putKey(): Promise<void> {}
 
   async deleteKey(): Promise<void> {}
+
+  async putTtl(): Promise<void> {}
 
   async putHashFields(): Promise<void> {}
 

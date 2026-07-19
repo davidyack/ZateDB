@@ -34,7 +34,7 @@ export function initSaturationMetrics(store: Store, respServer: RespServer): () 
 
   rss.addCallback((r) => r.observe(process.memoryUsage().rss));
   heapUsed.addCallback((r) => r.observe(process.memoryUsage().heapUsed));
-  storeBytes.addCallback((r) => r.observe(store.stats().memoryEstimateBytes));
+  storeBytes.addCallback((r) => r.observe(store.memoryBytesEstimate()));
   connections.addCallback((r) => r.observe(respServer.activeConnectionCount()));
   loopLagP99.addCallback((r) => {
     r.observe(loopDelay.percentile(99) / 1e6); // nanoseconds -> ms

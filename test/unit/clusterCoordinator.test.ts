@@ -90,6 +90,63 @@ describe('ClusterCoordinator HA mode: hydration', () => {
   });
 });
 
+describe('ClusterCoordinator HA mode: hydration filtering & bounding', () => {
+  function buildNode(durable: FakeDurableStore, store: Store, maxMemoryBytes?: number): ClusterCoordinator {
+    return new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport: new FakeReplicationHub().createTransport('node-h'),
+      nodeId: 'node-h',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      maxMemoryBytes,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+  }
+
+  it('skips already-expired durable keys during hydration', async () => {
+    const durable = new FakeDurableStore();
+    await durable.putKey('live', { type: 'string', value: 'v', expiresAtMs: Date.now() + 60_000 });
+    await durable.putKey('dead', { type: 'string', value: 'v', expiresAtMs: Date.now() - 1 });
+    await durable.putKey('forever', { type: 'string', value: 'v', expiresAtMs: null });
+
+    const store = new Store(0);
+    const cluster = buildNode(durable, store);
+    await cluster.start();
+
+    expect(store.exists('live')).toBe(true);
+    expect(store.exists('forever')).toBe(true);
+    expect(store.exists('dead')).toBe(false); // never resurrected
+    expect(store.keyCounts().string).toBe(2);
+
+    await cluster.stop();
+    store.close();
+  });
+
+  it('stops hydrating once the loaded estimate crosses maxMemoryBytes (no restart-loop OOM)', async () => {
+    const durable = new FakeDurableStore();
+    for (let i = 0; i < 10; i++) {
+      await durable.putKey(`k${i}`, { type: 'string', value: 'x'.repeat(100), expiresAtMs: null });
+    }
+
+    const store = new Store(0);
+    // A tiny ceiling: the first key loads (estimate starts at 0), then the
+    // next check trips the bound — so we get a partial, bounded hydration
+    // rather than loading all 10 and OOMing.
+    const cluster = buildNode(durable, store, 1);
+    await cluster.start();
+
+    expect(cluster.isHydrated).toBe(true); // still becomes ready
+    expect(store.keyCounts().string).toBeLessThan(10); // but did NOT load everything
+
+    await cluster.stop();
+    store.close();
+  });
+});
+
 describe('ClusterCoordinator HA mode: cross-node convergence', () => {
   let durable: FakeDurableStore;
   let hub: FakeReplicationHub;
@@ -137,6 +194,21 @@ describe('ClusterCoordinator HA mode: cross-node convergence', () => {
     await waitFor(() => storeB.get('counter') === '1');
     expect(storeB.get('counter')).toBe('1');
     expect(durable.keys.get('counter')).toEqual({ type: 'string', value: '1', expiresAtMs: null });
+  });
+
+  it('replicates an EXPIRE as a TTL-only change to the other node', async () => {
+    storeA.set('k', 'v');
+    clusterA.publishKeyChange('k');
+    await waitFor(() => storeB.get('k') === 'v');
+
+    const at = Date.now() + 600_000;
+    storeA.pexpire('k', 600_000);
+    clusterA.publishTtlChange('k', at);
+
+    await waitFor(() => storeB.getKeyDetail('k')?.info.ttlMsRemaining != null);
+    expect(storeB.get('k')).toBe('v'); // value untouched, only the TTL was replicated
+    // The durable snapshot keeps its value and gains the expiry.
+    expect(durable.keys.get('k')).toEqual({ type: 'string', value: 'v', expiresAtMs: at });
   });
 
   it('replicates a delete', async () => {
