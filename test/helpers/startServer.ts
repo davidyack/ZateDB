@@ -38,11 +38,18 @@ export async function startTestServer(overrides: Partial<ServerConfig> = {}, ha?
     healthPort: 0,
     adminPort: 0,
     ttlSweepIntervalMs: 0,
+    maxKeys: 0,
+    maxMemoryBytes: 0,
+    maxClients: 0,
+    idleTimeoutMs: 0,
+    maxBulkBytes: 0,
+    maxBufferBytes: 0,
+    outboundHighWaterMarkBytes: 0,
     otelServiceName: 'backendcache-test',
     ...overrides,
   };
 
-  const store = ha?.store ?? new Store(config.ttlSweepIntervalMs);
+  const store = ha?.store ?? new Store(config.ttlSweepIntervalMs, { maxKeys: config.maxKeys, maxMemoryBytes: config.maxMemoryBytes });
   const pubsub = ha?.pubsub ?? new PubSubRegistry();
   const cluster = ha?.cluster ?? standaloneCluster(store, pubsub);
   await cluster.start();

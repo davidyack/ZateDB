@@ -70,4 +70,43 @@ describe('SET expiry option validation', () => {
     expect(ctx.store.get('k')).toBe('v');
     expect(ctx.store.getKeyDetail('k')?.info.ttlMsRemaining).toBeNull();
   });
+
+  it('rejects an unsupported SET option loudly instead of silently overwriting', () => {
+    // Previously `SET k v NX` returned +OK and unconditionally overwrote —
+    // silently wrong lock/idempotency semantics. It must error, and must not
+    // have written the key.
+    const out = dispatch(ctx, ['SET', 'k', 'v', 'NX']);
+    expect(out.isError).toBe(true);
+    expect(errorText(out.frames[0])).toMatch(/unsupported option 'NX'/);
+    expect(ctx.store.get('k')).toBeNull();
+  });
+});
+
+describe('EXPIRE / PEXPIRE integer validation', () => {
+  let ctx: CommandContext;
+  beforeEach(() => {
+    const store = new Store(0);
+    const pubsub = new PubSubRegistry();
+    ctx = { store, pubsub, conn: fakeConn(), config, cluster: standaloneCluster(store, pubsub) };
+    dispatch(ctx, ['SET', 'k', 'v']);
+  });
+  afterEach(() => ctx.store.close());
+
+  it('applies an integer EXPIRE', () => {
+    const out = dispatch(ctx, ['EXPIRE', 'k', '100']);
+    expect(out.isError).toBe(false);
+    expect(ctx.store.getKeyDetail('k')?.info.ttlMsRemaining).toBeGreaterThan(0);
+  });
+
+  it('rejects a fractional EXPIRE instead of applying a sub-second TTL', () => {
+    const out = dispatch(ctx, ['EXPIRE', 'k', '1.5']);
+    expect(out.isError).toBe(true);
+    expect(errorText(out.frames[0])).toMatch(/not an integer/);
+  });
+
+  it('rejects a fractional PEXPIRE', () => {
+    const out = dispatch(ctx, ['PEXPIRE', 'k', '2500.5']);
+    expect(out.isError).toBe(true);
+    expect(errorText(out.frames[0])).toMatch(/not an integer/);
+  });
 });

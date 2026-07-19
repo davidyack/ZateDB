@@ -7,8 +7,25 @@ import { RespProtocolError } from './types.js';
  * feed() may be called with partial TCP chunks; parsed commands are only
  * emitted once a full frame has arrived.
  */
+export interface ParserLimits {
+  /** Max declared length of a single bulk string. Guards against a `$<huge>` header. */
+  maxBulkBytes?: number;
+  /** Max unparsed bytes allowed to accumulate before the connection is a memory risk. */
+  maxBufferBytes?: number;
+}
+
+const DEFAULT_MAX_BULK_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
 export class RespRequestParser {
   private buffer: Buffer = Buffer.alloc(0);
+  private readonly maxBulkBytes: number;
+  private readonly maxBufferBytes: number;
+
+  constructor(limits: ParserLimits = {}) {
+    this.maxBulkBytes = limits.maxBulkBytes && limits.maxBulkBytes > 0 ? limits.maxBulkBytes : DEFAULT_MAX_BULK_BYTES;
+    this.maxBufferBytes = limits.maxBufferBytes && limits.maxBufferBytes > 0 ? limits.maxBufferBytes : DEFAULT_MAX_BUFFER_BYTES;
+  }
 
   feed(chunk: Buffer): string[][] {
     this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
@@ -20,6 +37,13 @@ export class RespRequestParser {
       const [command, rest] = result;
       if (command.length > 0) commands.push(command);
       this.buffer = rest;
+    }
+
+    // A frame that keeps arriving but never completes (slow/hostile client, or
+    // a declared bulk length just under the per-arg cap repeated) must not let
+    // the pending buffer grow without bound — that's an unauthenticated OOM.
+    if (this.buffer.length > this.maxBufferBytes) {
+      throw new RespProtocolError('request buffer exceeds limit');
     }
 
     return commands;
@@ -74,6 +98,9 @@ export class RespRequestParser {
       const len = parseInt(bulkHeaderLine.subarray(1).toString('ascii'), 10);
       if (Number.isNaN(len) || len < 0) {
         throw new RespProtocolError('invalid bulk length');
+      }
+      if (len > this.maxBulkBytes) {
+        throw new RespProtocolError('bulk length exceeds limit');
       }
       const dataEnd = afterBulkHeader + len;
       if (dataEnd + 2 > buf.length) return null;

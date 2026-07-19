@@ -3,6 +3,7 @@ import type { RespValue } from '../resp/types.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
 import { invalidPasswordError, wrongArgsError } from './errors.js';
+import { secureEqual } from '../util/secureCompare.js';
 
 export function ping(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length > 1) return result(wrongArgsError('ping'));
@@ -54,7 +55,7 @@ export function auth(ctx: CommandContext, args: string[]): CommandResult {
 
 function checkAuth(ctx: CommandContext, password: string): boolean {
   if (!ctx.config.authPassword) return true;
-  return password === ctx.config.authPassword;
+  return secureEqual(password, ctx.config.authPassword);
 }
 
 export function client(ctx: CommandContext, args: string[]): CommandResult {

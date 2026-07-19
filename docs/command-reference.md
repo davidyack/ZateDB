@@ -13,10 +13,10 @@ by integration tests against the real client libraries that use it — see
 | `CLIENT SETINFO` / `GETNAME` / `SETNAME` / `ID` | No-ops beyond bookkeeping — must never error, since node-redis sends `SETINFO` on every connect and treats an error there as a connection failure. |
 | `QUIT` | Replies `OK`, then closes the socket. |
 | `GET` | Returns a nil bulk string for a missing key. |
-| `SET` | Supports `EX seconds` and `PX ms`. A non-positive or non-integer expiry is rejected (matching real Redis), not silently coerced. |
+| `SET` | Supports `EX seconds` and `PX ms`. A non-positive or non-integer expiry is rejected (matching real Redis), not silently coerced. Unsupported options (`NX`/`XX`/`GET`/`KEEPTTL`) return `ERR unsupported option` rather than being silently accepted — a dropped `SET NX` would hand a lock/idempotency caller the wrong semantics. |
 | `DEL` | Multi-key; returns the count actually removed. |
 | `INCR` | Creates the key at `0` first, then increments. Errors if the existing value isn't a base-10 integer. |
-| `EXPIRE` / `PEXPIRE` | Support `NX`/`XX`/`GT`/`LT` flags. |
+| `EXPIRE` / `PEXPIRE` | Support `NX`/`XX`/`GT`/`LT` flags. The time argument must be an integer; a fractional value is rejected with `ERR value is not an integer or out of range`. |
 | `HSET` | Multi field/value pairs; returns the count of *new* fields added. |
 | `HDEL` | Multi-field; deletes the key entirely once its last field is removed. |
 | `HGETALL` | Returns an empty array (not an error) for a missing key. |
@@ -51,7 +51,7 @@ milliseconds.
 
 | Excluded | Why |
 |---|---|
-| `EVAL` / `EVALSHA` / `SCRIPT LOAD` (Lua scripting) | No embedded Lua runtime — and none is needed for cross-node atomicity either: HA replication and Cosmos DB persistence are both plain upserts/deletes, no stored procedures. `rate-limit-redis`'s default store needs Lua — see [The rate-limit store deviation](./rate-limit-store.md) for the one place a consuming app needs a small workaround. |
+| `EVAL` / `EVALSHA` / `SCRIPT LOAD` (Lua scripting) | No embedded Lua runtime — and none is needed for cross-node atomicity either: HA replication and Cosmos DB persistence use plain upserts/deletes/Patch-API calls, no stored procedures. `rate-limit-redis`'s default store needs Lua — see [The rate-limit store deviation](./rate-limit-store.md) for the one place a consuming app needs a small workaround. |
 | Redis-native persistence (RDB snapshots, AOF) | Durability is handled differently here — key state is persisted to Cosmos DB as part of cross-node replication (see [High availability](./high-availability.md)), not via Redis's own snapshot/append-only-file formats. `PUBLISH` messages are still never persisted anywhere, matching real Redis pub/sub's fire-and-forget semantics. |
 | Redis-native clustering/sharding (`CLUSTER *`, hash slots) | BackendCache's own multi-node HA (see [High availability](./high-availability.md)) is a from-scratch active-active design over Service Bus + Cosmos DB, not an implementation of Redis Cluster's protocol — no consuming app in scope talks `CLUSTER *`. |
 | RESP3, ACLs, other data types (lists, sets, streams, geo, bitmaps, HyperLogLog) | Add on demand when a real caller needs them; don't build speculatively. |

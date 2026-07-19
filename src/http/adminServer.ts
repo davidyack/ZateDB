@@ -6,6 +6,7 @@ import type { RespServer } from '../server/respServer.js';
 import type { ServerConfig } from '../config.js';
 import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 import { getCommandsProcessedTotal, recordAdminAction } from '../telemetry/commandTelemetry.js';
+import { secureEqual } from '../util/secureCompare.js';
 import { logger } from '../logger.js';
 
 const startedAtMs = Date.now();
@@ -96,7 +97,7 @@ export class AdminServer {
   private isAuthorized(req: IncomingMessage): boolean {
     if (!this.config.adminToken) return true; // no token configured: rely on network isolation only
     const header = req.headers.authorization ?? '';
-    return header === `Bearer ${this.config.adminToken}`;
+    return secureEqual(header, `Bearer ${this.config.adminToken}`);
   }
 
   private async handleStats(res: ServerResponse): Promise<void> {
