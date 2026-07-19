@@ -1,0 +1,51 @@
+{
+  "name": "backendcache",
+  "version": "0.1.0",
+  "description": "Small, self-hosted, RESP-protocol-compatible cache/pubsub service implementing only the Redis command surface the consuming app actually uses.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "coverage-audit": "tsx scripts/commandCoverageAudit.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "optionalDependencies": {
+    "@azure/monitor-opentelemetry-exporter": "^1.0.0-beta.27",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.55.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0",
+    "@opentelemetry/resources": "^1.28.0",
+    "@opentelemetry/sdk-metrics": "^1.28.0",
+    "@opentelemetry/sdk-node": "^0.55.0",
+    "@opentelemetry/sdk-trace-node": "^1.28.0",
+    "@opentelemetry/semantic-conventions": "^1.28.0"
+  },
+  "devDependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.2",
+    "@types/uuid": "^10.0.0",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "rate-limit-redis": "^4.2.0",
+    "redis": "^5.0.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "uuid": "^11.0.4",
+    "vitest": "^2.1.8"
+  }
+}
