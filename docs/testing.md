@@ -15,7 +15,29 @@ unit-testing this repo's own logic in isolation.
 in isolation: RESP parser/serializer round-trips (including chunked TCP
 input and binary-safe bulk strings), store/TTL behavior (lazy expiry,
 active sweep, `WRONGTYPE` errors), the pub/sub registry (channel/pattern
-delivery, disconnect cleanup), and sorted-set range-bound parsing.
+delivery, disconnect cleanup), sorted-set range-bound parsing, and
+`ClusterCoordinator` ([`test/unit/clusterCoordinator.test.ts`](../test/unit/clusterCoordinator.test.ts)):
+standalone-mode no-ops, startup hydration from a durable store (including
+a live write arriving mid-hydration not being clobbered by the snapshot),
+cross-node convergence for key mutations and `PUBLISH`, field-level
+convergence for concurrent `HSET`/`ZADD` on *different* fields/members of
+the same key, self-origin filtering, and `drain()`. These run against
+`FakeDurableStore`/`FakeReplicationHub` in-memory doubles
+([`test/helpers/fakeCluster.ts`](../test/helpers/fakeCluster.ts)) rather
+than real Azure resources — no network dependency, and the doubles mirror
+the real Cosmos/Service Bus implementations' contracts (including the
+transport's self-origin message filter) closely enough to catch a
+regression in the coordinator's own logic.
+
+[`test/unit/dispatcherReplication.test.ts`](../test/unit/dispatcherReplication.test.ts)
+covers the dispatcher's replication *decisions* specifically: no-op
+commands against a key this node never had ship nothing (not a phantom
+delete), `SET`/`INCR`/`HSET`/`ZADD` still replicate when creating a brand
+new key, a partial `HDEL`/`ZREMRANGEBYSCORE` replicates only the removed
+field/member (verified against the exact shape landed in the durable
+store) while removing the last one replicates a whole-key delete instead
+of a leftover empty hash/set, and sequential writes to the same key
+replicate in call order despite artificially reordered network latency.
 
 ## Integration tests
 
@@ -43,6 +65,19 @@ libraries a consuming app uses:
   sends. This is the regression test for the class of gap a command-surface
   audit is meant to catch before it reaches production: a caller using a
   data structure or argument syntax that wasn't in scope.
+
+[`test/integration/haReplication.test.ts`](../test/integration/haReplication.test.ts)
+boots **two** full BackendCache RESP servers sharing a fake Cosmos DB /
+Service Bus pair (same doubles as the unit tests, wired through two
+independent `ClusterCoordinator`s) and drives each with its own real
+`redis` client — proving, end to end and at the RESP protocol level, that
+an `INCR`/`HSET`/`ZADD`/`DEL` issued against one node is visible from the
+other, and that a `PUBLISH` on one node reaches a subscriber connected
+only to the other (the actual cross-node case the Socket.IO adapter
+depends on). [`test/integration/adminServer.test.ts`](../test/integration/adminServer.test.ts)
+covers the admin API's cluster-aware behavior the same way (standalone vs.
+HA `/admin/stats`/`/admin/nodes`, and a `DELETE` propagating to the other
+node).
 
 ## Command coverage audit
 

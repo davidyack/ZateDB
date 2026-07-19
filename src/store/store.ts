@@ -252,15 +252,20 @@ export class Store {
     return added;
   }
 
-  zremrangebyscore(key: string, min: ScoreBound, max: ScoreBound): number {
+  /**
+   * Returns the members actually removed (not just a count) — the
+   * cluster dispatcher needs the names to replicate this as a targeted
+   * per-member delete rather than re-shipping the whole sorted set.
+   */
+  zremrangebyscore(key: string, min: ScoreBound, max: ScoreBound): string[] {
     const entry = this.requireType<SortedSetEntry>(key, 'sortedset');
-    if (!entry) return 0;
+    if (!entry) return [];
     const before = estimateEntrySize(key, entry);
-    let removed = 0;
+    const removed: string[] = [];
     for (const [member, score] of entry.members) {
       if (scoreInRange(score, min, max)) {
         entry.members.delete(member);
-        removed++;
+        removed.push(member);
       }
     }
     if (entry.members.size === 0) {
@@ -327,6 +332,95 @@ export class Store {
 
   deleteKey(key: string): boolean {
     return this.del([key]) === 1;
+  }
+
+  // ---- cluster hydration / replication ---------------------------------
+
+  /**
+   * Raw entry for a key, bypassing type-narrowing helpers — used by the
+   * cluster coordinator to snapshot post-mutation state for durable
+   * persistence and cross-node replication. Returns undefined for a
+   * missing or expired key.
+   */
+  getRawEntry(key: string): Entry | undefined {
+    return this.getLive(key);
+  }
+
+  /**
+   * Overwrites a key with an absolute entry snapshot — used both to
+   * hydrate from the durable store at startup and to apply a mutation
+   * replicated from another node. Never triggers further
+   * persistence/replication itself; the caller (ClusterCoordinator) owns
+   * that decision so applying a remote event doesn't re-broadcast it.
+   */
+  applyReplicatedUpsert(key: string, entry: Entry): void {
+    this.put(key, entry);
+  }
+
+  /** Removes a key as a result of hydration or a replicated delete, without cascading further replication. */
+  applyReplicatedDelete(key: string): void {
+    this.remove(key);
+  }
+
+  /**
+   * Applies a replicated HSET — sets only the named fields, leaving any
+   * other fields on the hash untouched. This (not a whole-entry
+   * overwrite) is what lets two nodes concurrently HSET *different*
+   * fields of the same key without either write clobbering the other.
+   * Deliberately not gated by ensureRoomForNewKey(): the mutation was
+   * already accepted on the node that originated it, so refusing to apply
+   * it here would just make this node's copy diverge, not protect it.
+   */
+  applyReplicatedHashFieldSet(key: string, fields: Array<[string, string]>): void {
+    const existing = this.data.get(key);
+    const reuse = existing?.type === 'hash';
+    const before = existing ? estimateEntrySize(key, existing) : 0;
+    const entry: HashEntry = reuse ? (existing as HashEntry) : { type: 'hash', fields: new Map(), expiresAtMs: null };
+    for (const [field, value] of fields) entry.fields.set(field, value);
+    this.data.set(key, entry);
+    this.memoryBytes += estimateEntrySize(key, entry) - before;
+  }
+
+  /** Applies a replicated HDEL — removes only the named fields. Deletes the whole key once its last field is gone, matching local HDEL semantics. */
+  applyReplicatedHashFieldDelete(key: string, fields: string[]): void {
+    const entry = this.data.get(key);
+    if (!entry || entry.type !== 'hash') return;
+    const before = estimateEntrySize(key, entry);
+    for (const field of fields) entry.fields.delete(field);
+    if (entry.fields.size === 0) {
+      this.remove(key);
+    } else {
+      this.memoryBytes += estimateEntrySize(key, entry) - before;
+    }
+  }
+
+  /**
+   * Applies a replicated ZADD — sets only the named members, leaving any
+   * other members on the sorted set untouched. See
+   * applyReplicatedHashFieldSet for why this isn't gated by
+   * ensureRoomForNewKey().
+   */
+  applyReplicatedZsetMemberSet(key: string, members: Array<[string, number]>): void {
+    const existing = this.data.get(key);
+    const reuse = existing?.type === 'sortedset';
+    const before = existing ? estimateEntrySize(key, existing) : 0;
+    const entry: SortedSetEntry = reuse ? (existing as SortedSetEntry) : { type: 'sortedset', members: new Map(), expiresAtMs: null };
+    for (const [member, score] of members) entry.members.set(member, score);
+    this.data.set(key, entry);
+    this.memoryBytes += estimateEntrySize(key, entry) - before;
+  }
+
+  /** Applies a replicated ZREMRANGEBYSCORE — removes only the named members. Deletes the whole key once its last member is gone, matching local semantics. */
+  applyReplicatedZsetMemberDelete(key: string, members: string[]): void {
+    const entry = this.data.get(key);
+    if (!entry || entry.type !== 'sortedset') return;
+    const before = estimateEntrySize(key, entry);
+    for (const member of members) entry.members.delete(member);
+    if (entry.members.size === 0) {
+      this.remove(key);
+    } else {
+      this.memoryBytes += estimateEntrySize(key, entry) - before;
+    }
   }
 }
 

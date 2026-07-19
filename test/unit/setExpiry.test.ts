@@ -3,28 +3,11 @@ import { dispatch } from '../../src/commands/dispatcher.js';
 import type { CommandContext, ConnectionContext } from '../../src/commands/context.js';
 import { Store } from '../../src/store/store.js';
 import { PubSubRegistry } from '../../src/pubsub/registry.js';
-import type { ServerConfig } from '../../src/config.js';
+import { loadConfig } from '../../src/config.js';
 import type { RespValue } from '../../src/resp/types.js';
+import { standaloneCluster } from '../helpers/cluster.js';
 
-const config: ServerConfig = {
-  respPort: 0,
-  healthPort: 0,
-  adminPort: 0,
-  authPassword: null,
-  adminToken: null,
-  ttlSweepIntervalMs: 0,
-  maxKeys: 0,
-  maxMemoryBytes: 0,
-  maxClients: 0,
-  idleTimeoutMs: 0,
-  maxBulkBytes: 0,
-  maxBufferBytes: 0,
-  outboundHighWaterMarkBytes: 0,
-  otelServiceName: 'test',
-  appInsightsConnectionString: null,
-  otlpTraceEndpoint: null,
-  otlpMetricsEndpoint: null,
-};
+const config = loadConfig({});
 
 function fakeConn(): ConnectionContext {
   return {
@@ -46,7 +29,9 @@ function errorText(frame: RespValue): string | null {
 describe('SET expiry option validation', () => {
   let ctx: CommandContext;
   beforeEach(() => {
-    ctx = { store: new Store(0), pubsub: new PubSubRegistry(), conn: fakeConn(), config };
+    const store = new Store(0);
+    const pubsub = new PubSubRegistry();
+    ctx = { store, pubsub, conn: fakeConn(), config, cluster: standaloneCluster(store, pubsub) };
   });
   afterEach(() => ctx.store.close());
 
@@ -100,7 +85,9 @@ describe('SET expiry option validation', () => {
 describe('EXPIRE / PEXPIRE integer validation', () => {
   let ctx: CommandContext;
   beforeEach(() => {
-    ctx = { store: new Store(0), pubsub: new PubSubRegistry(), conn: fakeConn(), config };
+    const store = new Store(0);
+    const pubsub = new PubSubRegistry();
+    ctx = { store, pubsub, conn: fakeConn(), config, cluster: standaloneCluster(store, pubsub) };
     dispatch(ctx, ['SET', 'k', 'v']);
   });
   afterEach(() => ctx.store.close());

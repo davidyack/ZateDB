@@ -8,15 +8,23 @@ import { error as respError } from '../resp/types.js';
 import type { Store } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { ServerConfig } from '../config.js';
+import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 import type { ConnectionContext, ConnectionMode } from '../commands/context.js';
 import { dispatch } from '../commands/dispatcher.js';
-import { traceCommand, recordConnectionClosed, recordConnectionOpened, recordSubscriptionChange } from '../telemetry/commandTelemetry.js';
+import {
+  traceCommand,
+  recordConnectionClosed,
+  recordConnectionOpened,
+  recordSubscriptionChange,
+  recordConnectionLifecycleEvent,
+} from '../telemetry/commandTelemetry.js';
 import { logger } from '../logger.js';
 
 export interface ConnectionDeps {
   store: Store;
   pubsub: PubSubRegistry;
   config: ServerConfig;
+  cluster: ClusterCoordinator;
 }
 
 /**
@@ -43,6 +51,7 @@ export class Connection implements ConnectionContext {
       maxBufferBytes: deps.config.maxBufferBytes,
     });
     recordConnectionOpened();
+    recordConnectionLifecycleEvent('connection.opened', { connectionId: this.id, remoteAddress: this.remoteAddress });
 
     // Reap idle connections so a leaked/abandoned socket can't accumulate
     // forever. Subscribers legitimately sit idle waiting for messages, so they
@@ -95,7 +104,10 @@ export class Connection implements ConnectionContext {
     const keyArg = rawArgs.length > 1 ? rawArgs[1] : undefined;
 
     const outcome = traceCommand(command, this.id, keyArg, () =>
-      dispatch({ store: this.deps.store, pubsub: this.deps.pubsub, conn: this, config: this.deps.config }, rawArgs),
+      dispatch(
+        { store: this.deps.store, pubsub: this.deps.pubsub, conn: this, config: this.deps.config, cluster: this.deps.cluster },
+        rawArgs,
+      ),
     );
 
     for (const frame of outcome.frames) this.write(frame);
@@ -136,6 +148,12 @@ export class Connection implements ConnectionContext {
     if (channels.length) recordSubscriptionChange('channel', -channels.length);
     if (patterns.length) recordSubscriptionChange('pattern', -patterns.length);
     recordConnectionClosed();
+    recordConnectionLifecycleEvent('connection.closed', {
+      connectionId: this.id,
+      remoteAddress: this.remoteAddress,
+      channelSubscriptions: channels.length,
+      patternSubscriptions: patterns.length,
+    });
     logger.debug('connection.closed', { connectionId: this.id, remoteAddress: this.remoteAddress });
   }
 
