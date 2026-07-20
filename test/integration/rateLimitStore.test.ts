@@ -7,17 +7,17 @@ import { createClient } from 'redis';
 import type { RedisClientType } from 'redis';
 import { startTestServer } from '../helpers/startServer.js';
 import type { TestServer } from '../helpers/startServer.js';
-import { BackendCacheRateLimitStore } from '../../examples/rateLimitStore.js';
+import { ZateDBRateLimitStore } from '../../examples/rateLimitStore.js';
 
 /**
  * Proves the one deliberate deviation in the design spec (§5): since
- * BackendCache has no Lua/EVAL support, the consuming app's rate-limit
+ * ZateDB has no Lua/EVAL support, the consuming app's rate-limit
  * middleware swaps rate-limit-redis's default (EVALSHA-based) store for a
  * ~15-line INCR + EXPIRE NX store. This test wires that store into a real
  * express-rate-limit middleware, backed by a real node-redis client talking
- * to a real BackendCache instance, and confirms limiting still works.
+ * to a real ZateDB instance, and confirms limiting still works.
  */
-describe('rate-limit-redis replacement store (spec §5) against BackendCache', () => {
+describe('rate-limit-redis replacement store (spec §5) against ZateDB', () => {
   let server: TestServer;
   let client: RedisClientType;
   let app: Express;
@@ -36,7 +36,7 @@ describe('rate-limit-redis replacement store (spec §5) against BackendCache', (
         limit: 3,
         standardHeaders: true,
         legacyHeaders: false,
-        store: new BackendCacheRateLimitStore(client, 60_000, 'test-rl:'),
+        store: new ZateDBRateLimitStore(client, 60_000, 'test-rl:'),
       }),
     );
     app.get('/ping', (_req, res) => res.json({ ok: true }));
@@ -63,7 +63,7 @@ describe('rate-limit-redis replacement store (spec §5) against BackendCache', (
     expect(blocked.status).toBe(429);
   });
 
-  it('the counter is a real INCR-backed string key visible in BackendCache directly', async () => {
+  it('the counter is a real INCR-backed string key visible in ZateDB directly', async () => {
     const { keys } = server.store.listKeys('test-rl:', 100, 0);
     expect(keys).toHaveLength(1);
     expect(keys[0].type).toBe('string');

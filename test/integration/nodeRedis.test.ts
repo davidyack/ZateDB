@@ -9,7 +9,7 @@ import type { TestServer } from '../helpers/startServer.js';
  * real node-redis v5 client — the same library/version the consuming app
  * uses. This is the compatibility target, not a hand-written RESP spec.
  */
-describe('node-redis v5 client against BackendCache', () => {
+describe('node-redis v5 client against ZateDB', () => {
   let server: TestServer;
   let client: RedisClientType;
 

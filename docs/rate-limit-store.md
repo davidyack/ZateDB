@@ -1,13 +1,13 @@
 # The rate-limit store deviation
 
 This is the one place a consuming app needs a small, deliberate code
-change to work with BackendCache — everywhere else, pointing `REDIS_URL`
-at BackendCache is a config-only change.
+change to work with ZateDB — everywhere else, pointing `REDIS_URL`
+at ZateDB is a config-only change.
 
 ## Why
 
 `rate-limit-redis`'s default `RedisStore` sends a Lua script via
-`EVALSHA`/`EVAL` to increment-and-check atomically. BackendCache has no
+`EVALSHA`/`EVAL` to increment-and-check atomically. ZateDB has no
 embedded Lua runtime (see [Non-goals](./command-reference.md#non-goals)),
 so that default store doesn't work against it.
 
@@ -29,20 +29,20 @@ implements `express-rate-limit`'s `Store` interface directly (not
 
 ```ts
 import { rateLimit } from 'express-rate-limit';
-import { BackendCacheRateLimitStore } from './rateLimitStore';
+import { ZateDBRateLimitStore } from './rateLimitStore';
 
 app.use(
   rateLimit({
     windowMs: 60_000,
     limit: 100,
-    store: new BackendCacheRateLimitStore(redisClient, 60_000),
+    store: new ZateDBRateLimitStore(redisClient, 60_000),
   }),
 );
 ```
 
 It's exercised end-to-end in
 [`test/integration/rateLimitStore.test.ts`](../test/integration/rateLimitStore.test.ts)
-against a real `express-rate-limit` middleware and a real BackendCache
+against a real `express-rate-limit` middleware and a real ZateDB
 instance — including confirming the underlying counter is a real,
 `INCR`-backed string key.
 
@@ -60,7 +60,7 @@ set its expiry.
 
 `decrement()` (used only when `skipFailedRequests`/`skipSuccessfulRequests`
 are enabled) is a no-op in the reference implementation, since
-BackendCache's command surface has no `DECR` — it wasn't a real call site
+ZateDB's command surface has no `DECR` — it wasn't a real call site
 when the command table was built. If a consuming app needs it, extend
 [`src/commands`](../src/commands) (and the
 [command reference](./command-reference.md)) rather than working around

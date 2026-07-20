@@ -29,10 +29,10 @@ See [High availability](./high-availability.md) for the architecture these enabl
 | `NODE_ID` | unset | This node's identity, used as its Service Bus subscription name and Cosmos DB heartbeat document id. Falls back to `CONTAINER_APP_REPLICA_NAME` (set automatically by Container Apps), then a random id. |
 | `SERVICE_BUS_CONNECTION_STRING` | unset | Enables Service Bus-based cross-node replication via a SAS connection string. The policy needs **Manage** rights — each node creates/deletes its own subscription dynamically. Prefer managed identity (below) in production. |
 | `SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE` | unset | Service Bus namespace host (e.g. `my-ns.servicebus.windows.net`) for managed-identity (AAD) auth, used when no connection string is set. The identity needs a role allowing topic manage + send/receive. Also accepts `SERVICE_BUS_NAMESPACE`. |
-| `SERVICE_BUS_TOPIC_NAME` | `backendcache-replication` | Shared topic every node publishes to and subscribes from |
+| `SERVICE_BUS_TOPIC_NAME` | `zatedb-replication` | Shared topic every node publishes to and subscribes from |
 | `COSMOS_CONNECTION_STRING` | unset | Cosmos DB key-based auth. Takes precedence over `COSMOS_ENDPOINT`. |
 | `COSMOS_ENDPOINT` | unset | Cosmos DB account endpoint, for managed-identity (AAD) auth when no connection string is set |
-| `COSMOS_DATABASE` | `backendcache` | Database name — must already exist |
+| `COSMOS_DATABASE` | `zatedb` | Database name — must already exist |
 | `COSMOS_KEYS_CONTAINER` | `keys` | Container for key state, partitioned on `/key` — must already exist. Enable **`DefaultTimeToLive`** on it (e.g. `-1`, "on but no default") so Cosmos evicts expired keys via the per-document `ttl` and the container doesn't grow unbounded — see [High availability](./high-availability.md#operational-notes) |
 | `COSMOS_NODES_CONTAINER` | `nodes` | Container for node heartbeat/topology snapshots, partitioned on `/nodeId` — must already exist |
 | `HEARTBEAT_INTERVAL_MS` | `10000` | How often each node writes its stats/topology snapshot to Cosmos DB |
@@ -46,8 +46,8 @@ See [High availability](./high-availability.md) for the architecture these enabl
 | `MAX_FAILED_AUTH_ATTEMPTS` | `5` | Consecutive failed `AUTH` attempts on one connection before it's dropped, forcing a full reconnect per burst of guesses to blunt line-speed password brute force. `0` disables |
 | `SLOW_COMMAND_LOG_MS` | `0` (off) | Log any command taking at least this many ms (with a redacted key), for latency diagnosis. Commands are normally sub-millisecond, so a small value like `10` is high-signal; `0` disables |
 
-A consuming application points its `REDIS_URL` at BackendCache exactly as
-it would at real Redis — e.g. `redis://:<password>@backendcache:6379` —
+A consuming application points its `REDIS_URL` at ZateDB exactly as
+it would at real Redis — e.g. `redis://:<password>@zatedb:6379` —
 with no other code changes beyond the
 [rate-limit store deviation](./rate-limit-store.md).
 
@@ -88,7 +88,7 @@ to already exist); apply the policy where that container is defined.
 
 ### 2. Capacity mode: serverless vs. provisioned
 
-Pick from **measured** RU, not a guess (the `backendcache.cosmos.request_units`
+Pick from **measured** RU, not a guess (the `zatedb.cosmos.request_units`
 metric exists for exactly this — see [Observability](./observability.md)):
 
 - **Serverless** bills per request — wins at low or bursty sustained RU.
@@ -131,13 +131,13 @@ since telemetry is never a hard runtime dependency (see
 [Observability](./observability.md)).
 
 ```bash
-docker build -t backendcache:latest .
-docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 backendcache:latest
+docker build -t zatedb:latest .
+docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 zatedb:latest
 ```
 
 ## Azure Container Apps
 
-`infra/backendcache.bicep` is a deployment sketch for running BackendCache
+`infra/zatedb.bicep` is a deployment sketch for running ZateDB
 as a multi-node Azure Container App with internal-only ingress, inside a
 Container Apps Environment your infrastructure already provisions. It's
 not a complete, standalone template — it assumes the surrounding

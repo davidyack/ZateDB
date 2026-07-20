@@ -1,5 +1,5 @@
 {
-  "name": "backendcache",
+  "name": "zatedb",
   "version": "0.1.0",
   "description": "Small, self-hosted, RESP-protocol-compatible cache/pubsub service implementing only the Redis command surface the consuming app actually uses.",
   "type": "module",

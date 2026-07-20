@@ -31,7 +31,7 @@ class ScriptCache {
     this.byHash.clear();
   }
 
-  /** Number of cached scripts — backs the `backendcache.scripts.cache.size` gauge. */
+  /** Number of cached scripts — backs the `zatedb.scripts.cache.size` gauge. */
   size(): number {
     return this.byHash.size;
   }

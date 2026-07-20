@@ -66,7 +66,7 @@ deletes keys mid-scan — the exact pattern `connect-redis`'s `clear()` and
 similar session/cache stores use. `MATCH` applies Redis glob syntax (shared
 with `PSUBSCRIBE`) and `TYPE` filters to `string`, `hash`, or `sortedset`.
 
-This makes BackendCache a drop-in for the mainstream lock and
+This makes ZateDB a drop-in for the mainstream lock and
 session/cache-store ecosystem (`SET … NX PX` locks, `connect-redis`,
 `cache-manager`, `keyv`) on top of the original rate-limit / pub-sub surface.
 
@@ -91,7 +91,7 @@ VM (see [`src/scripting/luaEngine.ts`](../src/scripting/luaEngine.ts)):
   (`SUBSCRIBE`, `EVAL`, `AUTH`, …) are rejected from inside a script.
 
 This means `rate-limit-redis`'s **default** (Lua) store works against
-BackendCache directly — the [rate-limit store deviation](./rate-limit-store.md)
+ZateDB directly — the [rate-limit store deviation](./rate-limit-store.md)
 is now optional, not required.
 
 ## Non-goals
@@ -99,10 +99,10 @@ is now optional, not required.
 | Excluded | Why |
 |---|---|
 | Redis-native persistence (RDB snapshots, AOF) | Durability is handled differently here — key state is persisted to Cosmos DB as part of cross-node replication (see [High availability](./high-availability.md)), not via Redis's own snapshot/append-only-file formats. `PUBLISH` messages are still never persisted anywhere, matching real Redis pub/sub's fire-and-forget semantics. |
-| Redis-native clustering/sharding (`CLUSTER *`, hash slots) | BackendCache's own multi-node HA (see [High availability](./high-availability.md)) is a from-scratch active-active design over Service Bus + Cosmos DB, not an implementation of Redis Cluster's protocol — no consuming app in scope talks `CLUSTER *`. |
+| Redis-native clustering/sharding (`CLUSTER *`, hash slots) | ZateDB's own multi-node HA (see [High availability](./high-availability.md)) is a from-scratch active-active design over Service Bus + Cosmos DB, not an implementation of Redis Cluster's protocol — no consuming app in scope talks `CLUSTER *`. |
 | RESP3, ACLs, other data types (lists, sets, streams, geo, bitmaps, HyperLogLog) | Add on demand when a real caller needs them; don't build speculatively. |
 | TLS termination in-process | Assumes a private, same-environment network hop (e.g. Container Apps internal ingress). Terminate TLS upstream if your network policy requires it in transit. |
 
 If a future need grows past this list, prefer a real Redis-compatible
-engine (Valkey, Dragonfly) over expanding BackendCache into a
+engine (Valkey, Dragonfly) over expanding ZateDB into a
 general-purpose cache reimplementation.

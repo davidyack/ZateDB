@@ -21,12 +21,12 @@ function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 2000):
 }
 
 /**
- * End-to-end proof of the HA architecture using two full BackendCache RESP
+ * End-to-end proof of the HA architecture using two full ZateDB RESP
  * servers (real `redis` clients, one per node) sharing a fake Cosmos DB /
  * Service Bus pair — the same ClusterCoordinator wiring production uses,
  * with only the Azure SDK calls swapped for in-memory doubles (see
  * test/helpers/fakeCluster.ts). A client can talk to either node and see
- * the same shared state, which is the whole point of running BackendCache
+ * the same shared state, which is the whole point of running ZateDB
  * as more than one replica.
  */
 describe('multi-node HA replication (RESP-level, two nodes)', () => {

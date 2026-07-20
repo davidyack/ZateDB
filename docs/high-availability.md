@@ -4,7 +4,7 @@
 >
 > **Azure Cache for Redis was evaluated and rejected as the cross-replica
 > backend after 20+ failed deployment attempts in this Azure environment.**
-> BackendCache's Cosmos DB + Service Bus HA design is therefore the
+> ZateDB's Cosmos DB + Service Bus HA design is therefore the
 > committed architecture — it is the option that actually deploys here.
 > Reviews and future work optimize *within* this design (run-cost,
 > correctness, observability) rather than relitigating the choice of
@@ -12,7 +12,7 @@
 > on overwrites, per-write Cosmos RU cost — are documented below and are
 > managed, not incidental.
 
-BackendCache runs as multiple nodes behind one internal Container Apps
+ZateDB runs as multiple nodes behind one internal Container Apps
 ingress. Each node holds a full in-memory copy of the keyspace for fast
 reads, stays in sync with every other node over Azure Service Bus, and
 persists to Cosmos DB as the durable backing store — so a node restarting,
@@ -115,7 +115,7 @@ a `PUBLISH` on one node delivers to that node's local subscribers
 immediately, and is also broadcast so every other node delivers to *its*
 local subscribers. This is what makes the Socket.IO Redis adapter's
 cross-replica room broadcast work when the two Socket.IO server instances
-are connected to different BackendCache nodes.
+are connected to different ZateDB nodes.
 
 ### 3. Heartbeat
 
@@ -229,12 +229,12 @@ If a workload needs stronger guarantees than this (e.g. an exactly-once
 distributed counter), that's a sign it's outgrown what a lightweight
 cache/pub-sub shim in front of Cosmos DB + Service Bus can promise —
 reach for a real distributed store's native primitives instead of
-building a bespoke consensus layer on top of BackendCache.
+building a bespoke consensus layer on top of ZateDB.
 
 ## Standalone mode
 
 Setting neither Cosmos DB nor Service Bus configuration (see
-[Deployment](./deployment.md#configuration)) runs BackendCache exactly as
+[Deployment](./deployment.md#configuration)) runs ZateDB exactly as
 a single node with an in-memory-only store — identical behavior to
 running one replica, useful for local development and the test suite.
 
@@ -242,7 +242,7 @@ running one replica, useful for local development and the test suite.
 >
 > A standalone node **cannot detect that it is one of several replicas** —
 > with no shared backend there is no channel through which peers could even
-> announce themselves. So when HA is not configured, BackendCache *is* a
+> announce themselves. So when HA is not configured, ZateDB *is* a
 > single node, and the deployment must enforce that with **`minReplicas =
 > maxReplicas = 1`**. Run two or more replicas without HA and each serves
 > its own in-memory keyspace behind one connection-spraying load balancer:
@@ -251,7 +251,7 @@ running one replica, useful for local development and the test suite.
 > fan-out). Nothing inside the process can catch this — the guardrails below
 > cover the *configuration* mistakes it can see; the *replica-count* mistake
 > is yours to prevent at the platform, and to alert on via the
-> `backendcache.cluster.ha_enabled` metric joined with the platform's own
+> `zatedb.cluster.ha_enabled` metric joined with the platform's own
 > replica count (see [Observability](./observability.md#metrics)).
 
 **Partial HA config is a hard startup failure.** Configuring only one of
@@ -266,7 +266,7 @@ multi-replica deployment (the Bicep pins `minReplicas: 2`) must *never*
 silently run standalone; with `REQUIRE_HA` set, starting with neither
 dependency configured also crashes rather than running as independent
 non-replicating nodes. It is set in
-[`infra/backendcache.bicep`](../infra/backendcache.bicep); leave it unset
+[`infra/zatedb.bicep`](../infra/zatedb.bicep); leave it unset
 for local development and the test suite, where standalone is the intended
 mode.
 
@@ -389,7 +389,7 @@ marginal benefit largely overlaps the coalescing above, a correct
 trailing-edge throttle needs per-key timers and a per-key timestamp map
 (an unbounded-memory hazard on a large keyspace that must be bounded
 carefully), and the right interval can only be chosen from the
-`backendcache.cosmos.request_units` meter under real load. Add it if the
+`zatedb.cosmos.request_units` meter under real load. Add it if the
 metered RU justifies the machinery.
 
 **Right-sizing.** The numeric threshold above, the Cosmos capacity mode

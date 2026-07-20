@@ -1,6 +1,6 @@
 # Operations runbook
 
-Incident-time reference for BackendCache in HA mode. For the *why* behind
+Incident-time reference for ZateDB in HA mode. For the *why* behind
 these mechanisms see [High availability](./high-availability.md); this page
 is the *what to do*. Everything here uses tooling that already exists (admin
 API, metrics, logs) — no code changes required to diagnose.
@@ -28,7 +28,7 @@ membership directly.
 
 Check, in order:
 
-1. **Replication queue depth** — `backendcache.replication.queue_depth`
+1. **Replication queue depth** — `zatedb.replication.queue_depth`
    gauge. Steady near zero is healthy. Sustained growth means Cosmos/Service
    Bus writes aren't draining as fast as they arrive (a slow or throttled
    Cosmos, a Service Bus problem, or a write burst).
@@ -43,7 +43,7 @@ Check, in order:
    running has lost its heartbeat write path (Cosmos) — or crashed (its doc
    self-expires at ~2× `NODE_STALE_MS`).
 4. **Fatal replication exits** — `cluster.replication_fatal` /
-   `backendcache.replication_fatal` logs mean a node detected a dead
+   `zatedb.replication_fatal` logs mean a node detected a dead
    subscription or sustained receive errors and exited to be restarted (it
    re-creates its subscription and re-hydrates on restart). Repeated cycling
    points at a Service Bus permissions/topology problem.
@@ -82,7 +82,7 @@ convergent-only tier behaving as designed.
 
 ## Cost / Cosmos health
 
-- **RU consumption** — `backendcache.cosmos.request_units` (by operation).
+- **RU consumption** — `zatedb.cosmos.request_units` (by operation).
   A rising slope with flat traffic means a regression: check the indexing
   policy is applied to the `keys` container (the default policy multiplies
   write RU several-fold) and that `DURABILITY_MIN_TTL_MS` is set (otherwise
@@ -103,8 +103,8 @@ an oversized-entry recompute, then unset it.
 
 | Signal | Condition | Meaning |
 |---|---|---|
-| `backendcache.replication.queue_depth` | sustained > N for minutes | writes not draining — Cosmos/SB back-pressure |
+| `zatedb.replication.queue_depth` | sustained > N for minutes | writes not draining — Cosmos/SB back-pressure |
 | `cluster.anti_entropy_reconciled` `applied` | > 0 on consecutive passes | live replication is missing events |
-| `backendcache.cosmos.request_units` | slope up with flat traffic | cost regression (indexing policy / exemption off, keyspace growth) |
+| `zatedb.cosmos.request_units` | slope up with flat traffic | cost regression (indexing policy / exemption off, keyspace growth) |
 | `/readyz` | 503 beyond expected hydration time | stuck hydration — check `cluster.hydration_truncated` and Cosmos reachability |
 | `cluster.replication_fatal` | any, especially repeated | subscription death / SB problem; node cycling |

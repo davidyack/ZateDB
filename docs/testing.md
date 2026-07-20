@@ -41,7 +41,7 @@ replicate in call order despite artificially reordered network latency.
 
 ## Integration tests
 
-[`test/integration/`](../test/integration/) boots a real BackendCache
+[`test/integration/`](../test/integration/) boots a real ZateDB
 instance ([`test/helpers/startServer.ts`](../test/helpers/startServer.ts))
 on an ephemeral loopback port and exercises it with the actual client
 libraries a consuming app uses:
@@ -67,7 +67,7 @@ libraries a consuming app uses:
   data structure or argument syntax that wasn't in scope.
 
 [`test/integration/haReplication.test.ts`](../test/integration/haReplication.test.ts)
-boots **two** full BackendCache RESP servers sharing a fake Cosmos DB /
+boots **two** full ZateDB RESP servers sharing a fake Cosmos DB /
 Service Bus pair (same doubles as the unit tests, wired through two
 independent `ClusterCoordinator`s) and drives each with its own real
 `redis` client — proving, end to end and at the RESP protocol level, that
@@ -84,7 +84,7 @@ node).
 [`scripts/commandCoverageAudit.ts`](../scripts/commandCoverageAudit.ts) is
 a CI-time script a **consuming app** runs against its own source tree,
 scanning for Redis client call sites and failing if it finds a command
-BackendCache doesn't implement:
+ZateDB doesn't implement:
 
 ```bash
 npm run coverage-audit -- /path/to/consuming-app/src
@@ -110,7 +110,7 @@ throughput/latency probe. It drives the same `redis` (node-redis v5) client
 the consuming app uses and only issues commands from the
 [supported table](./command-reference.md), so it's meaningful out of the box
 — unlike `redis-benchmark`/`memtier_benchmark`, which default to commands
-BackendCache doesn't implement and need hand-tuned flags to stay inside the
+ZateDB doesn't implement and need hand-tuned flags to stay inside the
 command surface.
 
 ```bash
@@ -120,7 +120,7 @@ npm run bench -- -t set,get,incr       # only these commands
 npm run bench -- --url redis://host:6379   # against a running instance (add :pw@ for AUTH)
 ```
 
-By default it boots an in-process BackendCache on an ephemeral loopback port
+By default it boots an in-process ZateDB on an ephemeral loopback port
 (the same way the integration tests do), so no running instance is required;
 `--url` (or `REDIS_URL`) measures the real network path instead. It reports
 per-command ops/sec and latency percentiles (avg/p50/p95/p99/max).
@@ -128,7 +128,7 @@ per-command ops/sec and latency percentiles (avg/p50/p95/p99/max).
 This is a probe, not a formal benchmark: numbers depend on the machine, Node
 version, and (for `--url`) the network hop — use it to catch regressions and
 compare configurations, not as an absolute figure. It measures a single
-BackendCache node driven directly by one client; it deliberately does not
+ZateDB node driven directly by one client; it deliberately does not
 exercise cross-node HA replication (see
 [Architecture](./architecture.md)) — that path is covered by the
 integration tests above, not this throughput probe.

@@ -4,5 +4,5 @@
  * build-info metric — so a version bump lands in one place rather than
  * drifting across three separate hard-coded literals.
  */
-export const SERVER_NAME = 'backendcache';
+export const SERVER_NAME = 'zatedb';
 export const SERVER_VERSION = '1.0.0';

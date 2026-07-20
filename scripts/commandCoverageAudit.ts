@@ -2,9 +2,9 @@
 /**
  * CI gate (design spec §13.4): greps the consuming app's source tree for
  * Redis call sites and diffs the RESP command set actually used against
- * the command table BackendCache implements (§7, mirrored in
+ * the command table ZateDB implements (§7, mirrored in
  * src/commands/dispatcher.ts). Fails when the consuming app calls a
- * command BackendCache doesn't support — the same class of gap that let
+ * command ZateDB doesn't support — the same class of gap that let
  * the sorted-set commands slip out of the first draft of this spec.
  *
  * Usage:
@@ -57,7 +57,7 @@ const METHOD_TO_COMMAND: Record<string, string> = {
   eval: 'EVAL',
   evalSha: 'EVALSHA',
   scriptLoad: 'SCRIPT',
-  // Commonly-used commands BackendCache deliberately does not implement (§3) —
+  // Commonly-used commands ZateDB deliberately does not implement (§3) —
   // listed explicitly so a hit produces an actionable message, not a silent miss.
   lPush: 'LPUSH',
   rPush: 'RPUSH',
@@ -149,10 +149,10 @@ function main(): void {
 
   console.log(`Found ${allSites.length} Redis call site(s) across ${files.length} file(s):`);
   const usedCommands = new Set(covered.map((s) => s.command));
-  console.log(`  Commands used and covered by BackendCache: ${[...usedCommands].sort().join(', ') || '(none)'}`);
+  console.log(`  Commands used and covered by ZateDB: ${[...usedCommands].sort().join(', ') || '(none)'}`);
 
   if (uncovered.length > 0) {
-    console.error('\nCommands used by the consuming app but NOT implemented by BackendCache:');
+    console.error('\nCommands used by the consuming app but NOT implemented by ZateDB:');
     for (const site of uncovered) {
       console.error(`  ${site.command}  at ${site.file}:${site.line}`);
     }
