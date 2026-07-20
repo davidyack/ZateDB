@@ -70,6 +70,14 @@ export interface ServerConfig {
    * sensible enabled value is ~60000 (see docs/high-availability.md).
    */
   durabilityMinTtlMs: number;
+  /**
+   * Max channels/patterns (each) included by subscriber count in a node's
+   * heartbeat snapshot. The heartbeat is re-written every
+   * HEARTBEAT_INTERVAL_MS, so an uncapped topology makes its Cosmos write RU
+   * grow with Socket.IO room count. Exact totals are always kept; only the
+   * per-name detail list is capped.
+   */
+  heartbeatTopSubscriptions: number;
   /** How long startup (Cosmos DB / Service Bus connect + hydration) may take before failing fast instead of hanging indefinitely. */
   clusterStartupTimeoutMs: number;
   /**
@@ -137,6 +145,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     nodeStaleMs: intFromEnv(env, 'NODE_STALE_MS', 30_000),
     antiEntropyIntervalMs: intFromEnv(env, 'ANTI_ENTROPY_INTERVAL_MS', 5 * 60_000),
     durabilityMinTtlMs: intFromEnv(env, 'DURABILITY_MIN_TTL_MS', 0),
+    heartbeatTopSubscriptions: intFromEnv(env, 'HEARTBEAT_TOP_SUBSCRIPTIONS', 25),
     clusterStartupTimeoutMs: intFromEnv(env, 'CLUSTER_STARTUP_TIMEOUT_MS', 30_000),
     shutdownHardLimitMs: intFromEnv(env, 'SHUTDOWN_HARD_LIMIT_MS', 10_000),
     requireHa: boolExact(env.REQUIRE_HA, false),

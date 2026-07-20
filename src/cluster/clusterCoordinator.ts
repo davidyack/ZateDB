@@ -25,6 +25,12 @@ interface FieldPayload {
  * operation on a field/member supersedes an earlier one — a set clears any
  * pending delete of the same name and vice versa.
  */
+/** Returns the `n` highest-scoring items (by `score`, descending); the whole array when `n <= 0`. */
+function topBy<T>(items: T[], n: number, score: (item: T) => number): T[] {
+  if (n <= 0 || items.length <= n) return items;
+  return [...items].sort((a, b) => score(b) - score(a)).slice(0, n);
+}
+
 function mergeFieldPayload(acc: FieldPayload, next: FieldPayload): void {
   for (const [name, value] of next.set) {
     acc.set.set(name, value);
@@ -82,6 +88,8 @@ export interface ClusterCoordinatorDeps {
    * everything. See config.durabilityMinTtlMs.
    */
   durabilityMinTtlMs?: number;
+  /** Cap on channels/patterns (each) detailed in a heartbeat snapshot; 0/unset keeps all. See config.heartbeatTopSubscriptions. */
+  heartbeatTopSubscriptions?: number;
   /**
    * Invoked when the replication transport reports an unrecoverable receive
    * condition (subscription gone / sustained errors). The process owner
@@ -545,15 +553,28 @@ export class ClusterCoordinator {
       // report a key breakdown.
       const keyCounts = this.deps.store.keyCounts();
       const topology = this.deps.pubsub.topology();
+      // Cap the per-name detail so the heartbeat doc (re-written every ~10 s)
+      // doesn't grow its Cosmos write RU with Socket.IO room count; totals
+      // stay exact.
+      const cap = this.deps.heartbeatTopSubscriptions ?? 0;
       const snapshot: NodeSnapshot = {
         nodeId: this.nodeId,
         lastHeartbeatMs: Date.now(),
         connectionCount: this.deps.connectionCount(),
         keyCounts,
         commandsTotal: this.deps.commandsTotal(),
-        subscriptions: topology,
+        subscriptions: {
+          channelCount: topology.channels.length,
+          patternCount: topology.patterns.length,
+          channels: topBy(topology.channels, cap, (c) => c.subscriberCount),
+          patterns: topBy(topology.patterns, cap, (p) => p.subscriberCount),
+        },
       };
-      await this.deps.durable.putNodeSnapshot(snapshot);
+      // TTL the heartbeat doc at ~2× the staleness window so a node that
+      // crashed without deregistering self-cleans (graceful deleteNodeSnapshot
+      // doesn't run on a crash) instead of lingering and re-billing queries.
+      const ttlSeconds = Math.max(1, Math.ceil((this.deps.nodeStaleMs * 2) / 1000));
+      await this.deps.durable.putNodeSnapshot(snapshot, ttlSeconds);
     } catch (err) {
       logger.warn('cluster.heartbeat_failed', { error: errorMessage(err) });
     }

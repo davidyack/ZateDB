@@ -71,6 +71,10 @@ export interface NodeSnapshot {
   keyCounts: Record<EntryTypeName, number>;
   commandsTotal: number;
   subscriptions: {
+    /** Total distinct channels/patterns on this node — always exact, even when the arrays below are capped. */
+    channelCount: number;
+    patternCount: number;
+    /** Top-N channels/patterns by subscriber count. Capped (see HEARTBEAT_TOP_SUBSCRIPTIONS) so the heartbeat doc — and its per-write RU — doesn't grow with Socket.IO room count. */
     channels: Array<{ channel: string; subscriberCount: number }>;
     patterns: Array<{ pattern: string; subscriberCount: number }>;
   };

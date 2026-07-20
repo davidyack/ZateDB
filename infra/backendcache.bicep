@@ -43,7 +43,7 @@ param cosmosDatabaseName string = 'backendcache'
 @description('Cosmos DB container for key state, partitioned on /key — must already exist. Enable DefaultTimeToLive on it (e.g. -1) so Cosmos evicts expired keys via each document\'s ttl property and the container doesn\'t grow unbounded — see docs/high-availability.md.')
 param cosmosKeysContainerName string = 'keys'
 
-@description('Cosmos DB container for node heartbeat/topology snapshots, partitioned on /nodeId — must already exist')
+@description('Cosmos DB container for node heartbeat/topology snapshots, partitioned on /nodeId — must already exist. Enable DefaultTimeToLive on it (e.g. -1) so a crashed node\'s heartbeat doc self-expires via its per-document ttl (~2x NODE_STALE_MS) instead of lingering.')
 param cosmosNodesContainerName string = 'nodes'
 
 @description('Service Bus topic name every node publishes/subscribes to for replication — created on demand if missing')

@@ -356,8 +356,14 @@ export class CosmosDurableStore implements DurableStore {
     }
   }
 
-  async putNodeSnapshot(snapshot: NodeSnapshot): Promise<void> {
-    await this.nodesContainer.items.upsert({ id: toDocId(snapshot.nodeId), ...snapshot });
+  async putNodeSnapshot(snapshot: NodeSnapshot, ttlSeconds?: number): Promise<void> {
+    // Native ttl (when set) self-cleans a crashed node's heartbeat doc:
+    // graceful deleteNodeSnapshot doesn't run on a crash, and a lingering
+    // doc would keep re-billing list queries. Requires DefaultTimeToLive on
+    // the nodes container (see infra/docs). ttl: -1 means "never expire".
+    const doc: Record<string, unknown> = { id: toDocId(snapshot.nodeId), ...snapshot };
+    if (ttlSeconds !== undefined) doc.ttl = ttlSeconds;
+    await this.nodesContainer.items.upsert(doc);
   }
 
   async listNodeSnapshots(): Promise<NodeSnapshot[]> {

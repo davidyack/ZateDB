@@ -64,7 +64,8 @@ export interface DurableStore {
   deleteZsetMembers(key: string, members: string[]): Promise<void>;
 
   /** Heartbeat: this node's current stats/topology snapshot. */
-  putNodeSnapshot(snapshot: NodeSnapshot): Promise<void>;
+  /** Heartbeat upsert. `ttlSeconds` (when set) native-expires the doc so a node that crashed without deregistering self-cleans. */
+  putNodeSnapshot(snapshot: NodeSnapshot, ttlSeconds?: number): Promise<void>;
 
   /** Every node's last-written heartbeat snapshot (staleness is filtered by the caller). */
   listNodeSnapshots(): Promise<NodeSnapshot[]>;
