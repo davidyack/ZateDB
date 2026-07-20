@@ -85,6 +85,7 @@ originating request's trace. This is an accepted gap.
 | `zatedb.commands.total` | Counter | `command`, `result` |
 | `zatedb.commands.duration_ms` | Histogram | `command` |
 | `zatedb.connections.active` | UpDownCounter | — |
+| `zatedb.connections.count` | Observable gauge | — currently open RESP connections, sampled on export (distinct from the `connections.active` UpDownCounter above) |
 | `zatedb.pubsub.subscriptions.active` | UpDownCounter | `type` (channel/pattern) |
 | `zatedb.admin.actions.total` | Counter | `action`, `result` |
 | `zatedb.keys.count` | Observable gauge | `type` (string/hash/sortedset) — this node's live in-memory key count, sampled on export |
@@ -95,6 +96,10 @@ originating request's trace. This is an accepted gap.
 | `zatedb.scripts.evalsha.total` | Counter | `result` (`hit`/`noscript`) — a `noscript` spike means the per-node in-memory script cache was lost (restart) or an `EVALSHA` hit a node that never saw the `SCRIPT LOAD`; clients recover via `EVAL` |
 | `zatedb.scripts.errors.total` | Counter | `phase` (`compile`/`runtime`) |
 | `zatedb.scripts.cache.size` | Observable gauge | — Lua scripts held in this node's SHA1 cache |
+| `zatedb.process.memory.rss_bytes` | Observable gauge | — resident set size, the leading indicator for the process running up against its container memory limit |
+| `zatedb.process.memory.heap_used_bytes` | Observable gauge | — V8 heap used |
+| `zatedb.store.memory_estimate_bytes` | Observable gauge | — estimated keyspace size; compare against `MAX_MEMORY_BYTES` to see how close the store is to its eviction bound |
+| `zatedb.event_loop.lag_p99_ms` | Observable gauge | — event-loop delay p99 over the last scrape window; the leading indicator of a fan-out or sweep stall, before it shows up as command latency |
 
 ### Prometheus `/metrics` endpoint
 
