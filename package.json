@@ -4,6 +4,7 @@
   "description": "Small, self-hosted, RESP-protocol-compatible cache/pubsub service implementing only the Redis command surface the consuming app actually uses.",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "engines": {
     "node": ">=20"
   },

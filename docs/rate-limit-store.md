@@ -1,20 +1,24 @@
-# The rate-limit store deviation
+# The rate-limit store
 
-This is the one place a consuming app needs a small, deliberate code
-change to work with ZateDB — everywhere else, pointing `REDIS_URL`
-at ZateDB is a config-only change.
+`rate-limit-redis`'s default `RedisStore` works against ZateDB **as-is** —
+pointing `REDIS_URL` at ZateDB is a config-only change. Its default store
+increments-and-checks atomically via a Lua script (`SCRIPT LOAD` +
+`EVALSHA`), and ZateDB runs that on its
+[embedded Lua VM](./command-reference.md#lua-scripting). This is exercised
+end-to-end in
+[`test/integration/rateLimitDefaultStore.test.ts`](../test/integration/rateLimitDefaultStore.test.ts).
 
-## Why
+> **History:** ZateDB originally had no Lua runtime, so the default store
+> failed with `ERR unknown command 'SCRIPT'` and this was the one deliberate
+> deviation a consuming app had to make. Lua support removed that
+> requirement; the store swap below is now an *optional* lighter-weight
+> alternative, not a prerequisite.
 
-`rate-limit-redis`'s default `RedisStore` sends a Lua script via
-`EVALSHA`/`EVAL` to increment-and-check atomically. ZateDB has no
-embedded Lua runtime (see [Non-goals](./command-reference.md#non-goals)),
-so that default store doesn't work against it.
+## Optional: a lighter-weight `INCR`-based store
 
-## The replacement
-
-Not a byte-for-byte drop-in, but an isolated ~15-line store swap in one
-file, using the same `redis` (node-redis) connection the app already has:
+If you'd rather avoid the Lua round-trip (`SCRIPT LOAD` on first use, then
+`EVALSHA` per request), an isolated ~15-line store swap in one file uses the
+same `redis` (node-redis) connection the app already has:
 
 ```ts
 count = await client.incr(key);

@@ -22,7 +22,7 @@
 
 ### High availability (multi-node) configuration
 
-See [High availability](./high-availability.md) for the architecture these enable — setting **both** a durable store and a replication transport switches the process from standalone (single-node) to HA (multi-node) mode; setting only one is a misconfiguration and falls back to standalone.
+See [High availability](./high-availability.md) for the architecture these enable — setting **both** a durable store and a replication transport switches the process from standalone (single-node) to HA (multi-node) mode; setting only one is a misconfiguration that **crashes at startup** (never a silent fallback). With no HA configured the process is a single node and the deployment must run exactly one replica — see [Standalone mode](./high-availability.md#standalone-mode).
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -48,8 +48,10 @@ See [High availability](./high-availability.md) for the architecture these enabl
 
 A consuming application points its `REDIS_URL` at ZateDB exactly as
 it would at real Redis — e.g. `redis://:<password>@zatedb:6379` —
-with no other code changes beyond the
-[rate-limit store deviation](./rate-limit-store.md).
+with no code changes; even `rate-limit-redis`'s default store works via
+[Lua support](./command-reference.md#lua-scripting) (an optional
+lighter-weight store is described in
+[The rate-limit store](./rate-limit-store.md)).
 
 ## Cosmos DB cost & sizing
 

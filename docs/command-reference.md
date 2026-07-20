@@ -91,8 +91,8 @@ VM (see [`src/scripting/luaEngine.ts`](../src/scripting/luaEngine.ts)):
   (`SUBSCRIBE`, `EVAL`, `AUTH`, …) are rejected from inside a script.
 
 This means `rate-limit-redis`'s **default** (Lua) store works against
-ZateDB directly — the [rate-limit store deviation](./rate-limit-store.md)
-is now optional, not required.
+ZateDB directly — the optional [`INCR`-based store](./rate-limit-store.md)
+is a lighter-weight alternative, no longer a requirement.
 
 ## Non-goals
 
