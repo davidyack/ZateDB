@@ -85,8 +85,10 @@ container-typed entries:
 }
 ```
 
-The container is provisioned outside this repo's Bicep sketch (it's assumed
-to already exist); apply the policy where that container is defined.
+[`infra/modules/cosmos-resources.bicep`](../infra/modules/cosmos-resources.bicep)
+applies this policy when it creates the container, so you get it by default.
+If you bring your own container (`createCosmosContainers: false`), apply it
+where that container is defined.
 
 ### 2. Capacity mode: serverless vs. provisioned
 
@@ -139,17 +141,40 @@ docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 zatedb:latest
 
 ## Azure Container Apps
 
-`infra/zatedb.bicep` is a deployment sketch for running ZateDB
-as a multi-node Azure Container App with internal-only ingress, inside a
-Container Apps Environment your infrastructure already provisions. It's
-not a complete, standalone template — it assumes the surrounding
-infrastructure (Container Apps Environment, container registry, managed
-identity, Application Insights, an existing Service Bus namespace, an
-existing Cosmos DB account/database/containers, and Key Vault secrets for
-`REDIS_AUTH_PASSWORD`, `ADMIN_TOKEN`, the Service Bus connection string,
-and the Cosmos DB connection string) is already in place.
+`infra/modules/zatedb.bicep` runs ZateDB as a multi-node Azure Container App
+with internal-only ingress. It's designed to be consumed as a module from a
+consuming application's own Bicep: you pass the **names** of infrastructure
+you already have, and the module creates everything ZateDB-specific inside
+it — its own managed identity, its own replication topic, its own Cosmos
+database and containers, and every role assignment those need.
 
-Key properties of the sketch:
+```bicep
+module zatedb 'modules/zatedb.bicep' = {
+  name: 'zatedb'
+  params: {
+    namePrefix: 'contoso'
+    managedEnvironmentId: containerAppsEnvironment.id
+    containerImage: 'myregistry.azurecr.io/zatedb:abc123'
+    containerRegistryName: 'myregistry'
+    serviceBusNamespaceName: serviceBus.name
+    cosmosAccountName: cosmos.name
+    authPassword: redisPassword
+  }
+}
+
+// then, in your app:
+{ name: 'REDIS_URL', value: 'redis://:${redisPassword}@${zatedb.outputs.hostAndPort}' }
+```
+
+The prerequisites are a Container Apps Environment, a Service Bus namespace,
+a Cosmos DB account, a pushed image, and a password. Everything else has a
+default. See [`infra/README.md`](../infra/README.md) for the resource-group
+and subscription overrides when those live elsewhere, the four "I already
+have Cosmos" variants, and the permissions the deploying principal needs.
+[`infra/examples/consumer-app.bicep`](../infra/examples/consumer-app.bicep)
+is a complete worked example.
+
+Key properties:
 
 - `ingress.external = false` — no public IP, ever.
 - `scale: { minReplicas: 2, maxReplicas: 5 }`, scaling on concurrent TCP
@@ -159,13 +184,21 @@ Key properties of the sketch:
   readiness fails until this node has finished hydrating its in-memory
   copy from Cosmos DB, so a fresh replica is never routed a client before
   its cache is warm.
-- `REDIS_AUTH_PASSWORD`, `ADMIN_TOKEN`, and the Service Bus/Cosmos DB
-  connection strings are all pulled from Key Vault via a user-assigned
-  managed identity, matching how this kind of infra usually already
-  stores connection secrets.
+- Service Bus and Cosmos DB are reached with a user-assigned managed
+  identity, never a connection string or account key — so there's no broad
+  secret to store, leak, or rotate. The Cosmos grant is scoped to ZateDB's
+  own database, so in a shared account it can't reach anything else you
+  keep there.
+- `REDIS_AUTH_PASSWORD` and `ADMIN_TOKEN` are `@secure()` parameters,
+  since the consuming app needs the password anyway to build its own
+  `REDIS_URL`. Key Vault secret URIs are accepted as an override for shops
+  that require them.
 - `NODE_ID` is deliberately left unset in the template — each node falls
   back to `CONTAINER_APP_REPLICA_NAME`, which Container Apps sets
   automatically and uniquely per replica.
+- The Cosmos containers are created with `DefaultTimeToLive` and the
+  restricted indexing policy already applied, so the cost guidance below is
+  enforced by the template rather than left as a manual step.
 
 This is strictly better network isolation than a managed Redis offering
 reachable via VNet/Private Endpoints, since there is no public endpoint at

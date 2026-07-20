@@ -266,7 +266,7 @@ multi-replica deployment (the Bicep pins `minReplicas: 2`) must *never*
 silently run standalone; with `REQUIRE_HA` set, starting with neither
 dependency configured also crashes rather than running as independent
 non-replicating nodes. It is set in
-[`infra/zatedb.bicep`](../infra/zatedb.bicep); leave it unset
+[`infra/modules/zatedb.bicep`](../infra/modules/zatedb.bicep); leave it unset
 for local development and the test suite, where standalone is the intended
 mode.
 
