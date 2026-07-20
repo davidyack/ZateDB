@@ -6,6 +6,7 @@ import { wrongArgsError } from './errors.js';
 import { COMMANDS, runCommand } from './dispatcher.js';
 import { runLuaScript } from '../scripting/luaEngine.js';
 import { scriptCache } from '../scripting/scriptCache.js';
+import { recordEvalsha, recordScriptError } from '../telemetry/scriptMetrics.js';
 
 /**
  * Commands a script may not invoke via redis.call. Connection/session state
@@ -67,6 +68,11 @@ function runWithArgs(ctx: CommandContext, commandName: string, source: string, r
     argv,
     redisCall: (callArgs) => executeScriptCommand(ctx, callArgs),
   });
+  if (reply.type === 'error') {
+    // The compile-failure message is a stable literal from luaEngine; anything
+    // else that surfaced as an error came from executing the script.
+    recordScriptError(reply.value.includes('Error compiling script') ? 'compile' : 'runtime');
+  }
   return { frames: [reply] };
 }
 
@@ -83,8 +89,10 @@ export function evalshaCommand(ctx: CommandContext, args: string[]): CommandResu
   const [sha, ...rest] = args;
   const source = scriptCache.get(sha);
   if (source === undefined) {
+    recordEvalsha('noscript');
     return result(error('NOSCRIPT No matching script. Please use EVAL.'));
   }
+  recordEvalsha('hit');
   return runWithArgs(ctx, 'evalsha', source, rest);
 }
 

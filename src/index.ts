@@ -8,7 +8,9 @@ import { initTelemetry } from './telemetry/otel.js';
 import { bindKeyCountsSource, bindSlowCommandThreshold, getCommandsProcessedTotal } from './telemetry/commandTelemetry.js';
 import { createClusterCoordinator } from './cluster/factory.js';
 import { initSaturationMetrics } from './telemetry/saturation.js';
-import { registerReplicationQueueGauge } from './telemetry/clusterMetrics.js';
+import { registerReplicationQueueGauge, registerClusterHealthGauge } from './telemetry/clusterMetrics.js';
+import { registerScriptCacheSizeGauge } from './telemetry/scriptMetrics.js';
+import { scriptCache } from './scripting/scriptCache.js';
 import { logger } from './logger.js';
 
 /**
@@ -92,6 +94,8 @@ async function main(): Promise<void> {
 
   const stopSaturationMetrics = initSaturationMetrics(store, respServer);
   registerReplicationQueueGauge(() => cluster.replicationQueueDepth());
+  registerClusterHealthGauge(() => cluster.haEnabled);
+  registerScriptCacheSizeGauge(() => scriptCache.size());
 
   logger.info('backendcache.started', {
     respPort: config.respPort,

@@ -91,6 +91,10 @@ originating request's trace. This is an accepted gap.
 | `backendcache.cosmos.request_units` | Counter | `operation` (upsert/patch/query/delete) — Cosmos RU consumed, the dominant HA cost. Slope over time is the cost signal for capacity-mode/threshold decisions |
 | `backendcache.servicebus.publishes` | Counter | — replication events published to the topic |
 | `backendcache.replication.queue_depth` | Observable gauge | pending + in-flight replication tasks — where write back-pressure accumulates under bursts or a slow Cosmos |
+| `backendcache.cluster.ha_enabled` | Observable gauge | — `1` when HA replication (Cosmos+Service Bus) is active, `0` when standalone. Alert on `0` joined with the platform's replica-count metric: >1 replica while this reads `0` is split-brain (a node can't detect siblings without the shared backend, so this is the in-process half of that signal) |
+| `backendcache.scripts.evalsha.total` | Counter | `result` (`hit`/`noscript`) — a `noscript` spike means the per-node in-memory script cache was lost (restart) or an `EVALSHA` hit a node that never saw the `SCRIPT LOAD`; clients recover via `EVAL` |
+| `backendcache.scripts.errors.total` | Counter | `phase` (`compile`/`runtime`) |
+| `backendcache.scripts.cache.size` | Observable gauge | — Lua scripts held in this node's SHA1 cache |
 
 ### Logs
 

@@ -47,3 +47,22 @@ export function registerReplicationQueueGauge(getDepth: () => number): void {
   });
   gauge.addCallback((result) => result.observe(getDepth()));
 }
+
+let haGaugeRegistered = false;
+
+/**
+ * Registers the HA-enabled gauge: 1 when this node replicates over
+ * Cosmos+Service Bus, 0 when it runs standalone. The single most useful
+ * split-brain signal — a node genuinely can't detect sibling replicas without
+ * a shared backend, so alert on `ha_enabled == 0` joined with the platform's
+ * own replica-count metric (e.g. Container Apps `Replicas`): >1 replica while
+ * this reads 0 is the divergent-per-connection-keyspace failure. Idempotent.
+ */
+export function registerClusterHealthGauge(getHaEnabled: () => boolean): void {
+  if (haGaugeRegistered) return;
+  haGaugeRegistered = true;
+  const gauge = meter.createObservableGauge('backendcache.cluster.ha_enabled', {
+    description: '1 when HA replication (Cosmos+Service Bus) is active, 0 when standalone/single-node',
+  });
+  gauge.addCallback((result) => result.observe(getHaEnabled() ? 1 : 0));
+}

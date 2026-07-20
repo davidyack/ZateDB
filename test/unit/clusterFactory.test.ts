@@ -29,13 +29,21 @@ describe('createClusterCoordinator REQUIRE_HA guard', () => {
     await expect(createClusterCoordinator(config, deps())).rejects.toThrow(/REQUIRE_HA is set/);
   });
 
-  it('throws when REQUIRE_HA is set but only ONE of the two dependencies is configured', async () => {
+  it('throws on a partial HA config even without REQUIRE_HA (never a valid mode)', async () => {
     const config = loadConfig({
-      REQUIRE_HA: 'true',
       COSMOS_CONNECTION_STRING: 'AccountEndpoint=https://x;AccountKey=y',
       // SERVICE_BUS_CONNECTION_STRING deliberately missing
     } as unknown as NodeJS.ProcessEnv);
-    await expect(createClusterCoordinator(config, deps())).rejects.toThrow(/REQUIRE_HA is set/);
+    await expect(createClusterCoordinator(config, deps())).rejects.toThrow(/Partial HA configuration/);
+  });
+
+  it('throws on a partial HA config regardless of REQUIRE_HA', async () => {
+    const config = loadConfig({
+      REQUIRE_HA: 'true',
+      SERVICE_BUS_CONNECTION_STRING: 'Endpoint=sb://x;SharedAccessKeyName=y;SharedAccessKey=z',
+      // COSMOS_CONNECTION_STRING deliberately missing
+    } as unknown as NodeJS.ProcessEnv);
+    await expect(createClusterCoordinator(config, deps())).rejects.toThrow(/Partial HA configuration/);
   });
 
   it('builds a standalone coordinator when REQUIRE_HA is unset and nothing is configured', async () => {
