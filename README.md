@@ -1,17 +1,27 @@
 # ZateDB
 
 A small, self-hosted, RESP-protocol-compatible cache and pub/sub service. It
-implements only the Redis command surface a consuming application actually
-calls, so an existing `redis` (node-redis v5) client, `rate-limit-redis`, and
-the Socket.IO Redis adapter can connect to it as a drop-in replacement for
-Redis — no new SDK, no consuming-code changes beyond
-[one deliberate exception](./docs/rate-limit-store.md).
+implements the Redis command surface consuming applications actually call, so
+an existing `redis` (node-redis v5) client, `rate-limit-redis` (including its
+default Lua-script store), and the Socket.IO Redis adapter connect to it as a
+drop-in replacement for Redis — no new SDK, and a config-only change.
 
 ZateDB is intentionally narrow in scope: it is not a general-purpose
-Redis-compatible engine. It supports strings, hashes, sorted sets, key
-expiry, and pub/sub — nothing else — and adds commands only when a real
-caller needs them. See the full [command reference](./docs/command-reference.md)
-for what's supported and why everything else is a deliberate non-goal.
+Redis-compatible engine. It supports:
+
+- **Strings** — `GET`/`SET` with `EX`/`PX`/`KEEPTTL`/`NX`/`XX`/`GET` (the
+  `SET … NX PX` distributed-lock primitive), `MGET`/`MSET`, `INCR`.
+- **Hashes** and **sorted sets** (range-bound `ZADD`/`ZCOUNT`/`ZREMRANGEBYSCORE`).
+- **Keys** — `DEL`, `EXISTS`, `EXPIRE`/`PEXPIRE`, `TTL`/`PTTL`, and `SCAN`
+  (for session/cache stores like `connect-redis`).
+- **Lua scripting** — `EVAL`/`EVALSHA`/`SCRIPT` on an embedded VM, with
+  `redis.call` and cross-node effects replication.
+- **Server** — `PING`, `INFO`, and a Prometheus `/metrics` endpoint.
+- **Pub/sub** — channel and pattern subscriptions.
+
+It adds commands only when a real caller needs them. See the full
+[command reference](./docs/command-reference.md) for what's supported and why
+everything else is a deliberate non-goal.
 
 ## Why this exists
 
@@ -67,7 +77,7 @@ configuration options and the full picture.
 - [Architecture](./docs/architecture.md) — transport, storage, pub/sub, and shutdown.
 - [High availability](./docs/high-availability.md) — running as multiple nodes: Service Bus replication, Cosmos DB persistence, hydration, and the consistency model.
 - [Command reference](./docs/command-reference.md) — every supported command, plus the non-goals and why each was excluded.
-- [The rate-limit store deviation](./docs/rate-limit-store.md) — the one place a consuming app needs a small code change.
+- [The rate-limit store](./docs/rate-limit-store.md) — `rate-limit-redis`'s default store now works via Lua; an optional lighter-weight `INCR`-based store is also provided.
 - [Deployment](./docs/deployment.md) — configuration, running locally, Docker, and the Container Apps Bicep sketch.
 - [Observability](./docs/observability.md) — the admin API, OpenTelemetry tracing/metrics, and logging.
 - [Testing](./docs/testing.md) — the testing strategy and the command coverage audit script.

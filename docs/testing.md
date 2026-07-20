@@ -48,10 +48,11 @@ libraries a consuming app uses:
 
 - **`redis` (node-redis v5)** — the full [command table](./command-reference.md),
   including `WRONGTYPE` errors and channel/pattern pub/sub delivery.
-- **A `rate-limit-redis`-shaped custom store** — see
-  [The rate-limit store deviation](./rate-limit-store.md) — wired into a
-  real `express-rate-limit` middleware, confirming the underlying counter
-  is a real `INCR`-backed key.
+- **`rate-limit-redis`** — both its **default Lua store** (`SCRIPT LOAD` +
+  `EVALSHA` on the embedded VM) and the optional
+  [`INCR`-based store](./rate-limit-store.md), each wired into a real
+  `express-rate-limit` middleware and confirming the underlying counter is a
+  real key in ZateDB.
 - **`@socket.io/redis-adapter`**, wired to two independent Socket.IO server
   instances (two "replicas"), confirming a broadcast — including a room
   broadcast — from one reaches a client connected only to the other. This
