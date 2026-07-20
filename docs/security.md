@@ -34,12 +34,21 @@
 - **The replication topic is inside the data-plane trust boundary.** Any
   principal that can *send* to the Service Bus topic can inject
   `upsert`/`delete`/`ttl`/`increment`/`publish` events into every node's
-  in-memory copy — replicated applies are validated for field presence but
-  deliberately bypass admission control (a peer already accepted the
-  write). This is acceptable *because* the topic is reachable only by the
-  cluster's own managed identity on an internal network; treat Send rights
-  on the topic as equivalent to write access to the whole keyspace and
-  scope them accordingly.
+  in-memory copy — replicated applies deliberately bypass admission control
+  (a peer already accepted the write). Inbound events are **shape- and
+  size-validated** before they're applied (`validateReplicationEvent`:
+  kind-discriminated, typed per field, arrays and strings bounded well above
+  any legitimate value), so a buggy or compromised publisher can't inject a
+  malformed or absurdly-large event straight into memory — a
+  defense-in-depth layer on top of the RBAC scoping. The topic is still
+  reachable only by the cluster's own managed identity on an internal
+  network; treat Send rights on it as equivalent to write access to the
+  whole keyspace and scope them accordingly.
+- **Short-TTL keys never reach durable storage.** With the persistence
+  exemption on (`DURABILITY_MIN_TTL_MS`), rate-limit / sliding-window keys
+  that expire within the threshold are replicated only in-memory and over
+  Service Bus, never written to Cosmos — a minor but real reduction in
+  data-at-rest exposure for the highest-churn, most-identifying keys.
 - **No `EVAL`/scripting support** means no arbitrary code execution
   surface — a structurally smaller attack surface than a general-purpose
   Redis-compatible engine, and a genuine security property of the

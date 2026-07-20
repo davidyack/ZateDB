@@ -3,6 +3,7 @@ import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { DurableStore } from './durableStore.js';
 import type { ReplicationTransport } from './replicationTransport.js';
 import type { NodeSnapshot, ReplicationEvent } from './types.js';
+import { validateReplicationEvent } from './types.js';
 import { entryToSnapshot, snapshotToEntry } from './snapshot.js';
 import { redactKey } from '../telemetry/commandTelemetry.js';
 import { errorMessage, logger } from '../logger.js';
@@ -533,7 +534,15 @@ export class ClusterCoordinator {
     this.track(drained);
   }
 
-  private applyRemoteEvent(event: ReplicationEvent): void {
+  private applyRemoteEvent(raw: ReplicationEvent): void {
+    // Off-the-wire events are untrusted (see validateReplicationEvent):
+    // shape- and size-check before applying, since replicated applies bypass
+    // admission control. A malformed/oversized event is dropped, not applied.
+    const event = validateReplicationEvent(raw);
+    if (event === null) {
+      logger.warn('cluster.invalid_remote_event', { kind: (raw as { kind?: unknown })?.kind });
+      return;
+    }
     try {
       if (event.kind === 'upsert' && event.key !== undefined && event.entry !== undefined) {
         this.deps.store.applyReplicatedUpsert(event.key, snapshotToEntry(event.entry));
