@@ -16,6 +16,7 @@
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
     "coverage-audit": "tsx scripts/commandCoverageAudit.ts",
+    "bench": "tsx scripts/benchmark.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
