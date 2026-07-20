@@ -317,11 +317,18 @@ export class ClusterCoordinator {
 
   private async doPublishTtlChange(key: string, expiresAtMs: number | null): Promise<void> {
     const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'ttl', key, expiresAtMs }));
-    if (this.skipDurableForTtl(expiresAtMs)) {
-      await broadcast; // the EXPIRE that just made this key short-lived — no point persisting the TTL either
-    } else {
-      await Promise.all([this.deps.durable.putTtl(key, expiresAtMs), broadcast]);
-    }
+    // Always persist a TTL change, even when the new TTL is below the
+    // exemption threshold. Skipping here was a bug (F1): a key that was
+    // durable with a longer (or no) expiry — the common `INCR` (durable) +
+    // `EXPIRE`-to-short rate-limit pattern — would keep its *old* expiry in
+    // Cosmos, so hydration/anti-entropy could resurrect it for longer than
+    // any live node believes it should exist. Persisting the short TTL stamps
+    // the doc's native `ttl` so Cosmos evicts it (and hydration's expiry
+    // filter excludes it) on the correct schedule. putTtl no-ops (404) when
+    // the key was never persisted, so a born-exempt key still costs nothing.
+    // EXPIRE is a rare per-window transition, not the hot path, so this is
+    // one cheap patch where it matters.
+    await Promise.all([this.deps.durable.putTtl(key, expiresAtMs), broadcast]);
   }
 
   /**
@@ -365,7 +372,20 @@ export class ClusterCoordinator {
       const snapshot = entryToSnapshot(entry);
       const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'upsert', key, entry: snapshot }));
       if (this.skipDurableForTtl(entry.expiresAtMs)) {
-        await broadcast; // short-TTL key: peers get it over Service Bus; skip the Cosmos RU
+        // Short-TTL key: peers get it over Service Bus; skip the Cosmos RU.
+        // The exemption assumes born-exempt keys (never durable), which is the
+        // common case (a SET/PX session token, an INCR counter that's then
+        // EXPIRE'd — see doPublishTtlChange, which stamps the short TTL onto
+        // any prior durable copy of the *counter*). The one residual edge
+        // (F2): `SET key v PX <short>` on a key that was *previously* written
+        // durably with a longer/no TTL leaves that older durable copy in
+        // Cosmos, since this path has no separate TTL event to stamp it. That
+        // pattern doesn't occur in this cache's workloads (rate-limit/presence
+        // keys aren't re-SET with a short TTL after being durable); if it ever
+        // does, `DEL` then re-create, or don't exempt that key class. Stamping
+        // every exempt write to cover it would cost a wasted RU per
+        // born-exempt write — the opposite of the point.
+        await broadcast;
       } else {
         await Promise.all([this.deps.durable.putKey(key, snapshot), broadcast]);
       }
