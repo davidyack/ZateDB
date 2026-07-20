@@ -5,12 +5,15 @@ on:
     branches: [main]
 
 env:
-  REGISTRY: dydemoacr.azurecr.io
   IMAGE: zatedb
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    env:
+      # Set as a repo/org secret rather than hardcoded so the registry
+      # hostname isn't public in a public repo.
+      REGISTRY: ${{ secrets.ACR_HOST_NAME }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,9 +21,9 @@ jobs:
 
       # Registry-wide admin credential. It is shared and unscoped, so any push
       # it makes is attributable only to "the registry admin" — rotate it with
-      # `az acr credential renew -n dydemoacr --password-name password` if it
-      # ever leaks, and prefer a repo-scoped OIDC identity if this graduates
-      # past demo use.
+      # `az acr credential renew -n <registry-name> --password-name password`
+      # if it ever leaks, and prefer a repo-scoped OIDC identity if this
+      # graduates past demo use.
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}

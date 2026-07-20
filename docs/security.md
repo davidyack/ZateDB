@@ -49,12 +49,11 @@
   that expire within the threshold are replicated only in-memory and over
   Service Bus, never written to Cosmos — a minor but real reduction in
   data-at-rest exposure for the highest-churn, most-identifying keys.
-- **No `EVAL`/scripting support** means no arbitrary code execution
-  surface — a structurally smaller attack surface than a general-purpose
-  Redis-compatible engine, and a genuine security property of the
-  "build only what we need" approach (see
-  [Non-goals](./command-reference.md#non-goals)), not just a cost-cutting
-  choice.
+- **`EVAL`/`EVALSHA` run in a sandboxed embedded Lua VM**, not a general
+  code-execution surface: no `os`, `io`, `package`, or `debug` library, and
+  connection/pubsub/scripting commands (`SUBSCRIBE`, `EVAL`, `AUTH`, …) are
+  rejected from inside a script (see
+  [Lua scripting](./command-reference.md#lua-scripting)).
 - **The admin `/admin/keys` list endpoint never returns values** — only
   key name, type, and TTL — specifically so a debugging tool can't double
   as a bulk-data-exfiltration surface even on an internal network. Fetching
