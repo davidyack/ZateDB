@@ -10,5 +10,6 @@ design choice, not just the "how".
 - [The rate-limit store deviation](./rate-limit-store.md) — the one place a consuming app needs a small code change.
 - [Deployment](./deployment.md) — configuration, running locally, Docker, and the Container Apps Bicep sketch.
 - [Observability](./observability.md) — the admin API, OpenTelemetry tracing/metrics, and logging.
+- [Operations runbook](./runbook.md) — incident-time diagnostics: admin-port access, "is replication flowing", hydration/durability semantics, cost health, and suggested alerts.
 - [Testing](./testing.md) — the testing strategy and the command coverage audit script.
 - [Security](./security.md) — the threat model and controls.

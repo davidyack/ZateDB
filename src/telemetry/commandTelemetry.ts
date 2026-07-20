@@ -3,6 +3,15 @@ import { metrics, SpanStatusCode, trace } from '@opentelemetry/api';
 import type { Attributes } from '@opentelemetry/api';
 import type { DispatchOutcome } from '../commands/dispatcher.js';
 import type { Store } from '../store/store.js';
+import { logger } from '../logger.js';
+
+/** Commands taking at least this many ms are logged (0 = disabled). Set at startup via bindSlowCommandThreshold. */
+let slowCommandThresholdMs = 0;
+
+/** Wires the slow-command log threshold from config; called once at startup (index.ts). */
+export function bindSlowCommandThreshold(ms: number): void {
+  slowCommandThresholdMs = ms > 0 ? ms : 0;
+}
 
 const tracer = trace.getTracer('backendcache');
 const meter = metrics.getMeter('backendcache');
@@ -80,10 +89,11 @@ export function traceCommand<T extends DispatchOutcome>(
     if (keyArg !== undefined) span.setAttribute('backendcache.key', redactKey(keyArg));
 
     let outcome: T;
+    let resultLabel: 'success' | 'error' = 'error';
     try {
       totalCommandsProcessed++;
       outcome = fn();
-      const resultLabel = outcome.isError ? 'error' : 'success';
+      resultLabel = outcome.isError ? 'error' : 'success';
       span.setAttribute('backendcache.result', resultLabel);
       if (outcome.isError) span.setStatus({ code: SpanStatusCode.ERROR });
       commandsTotal.add(1, { command, result: resultLabel });
@@ -94,7 +104,19 @@ export function traceCommand<T extends DispatchOutcome>(
       commandsTotal.add(1, { command, result: 'error' });
       throw err;
     } finally {
-      commandsDurationMs.record(performance.now() - start, { command });
+      const durationMs = performance.now() - start;
+      commandsDurationMs.record(durationMs, { command });
+      // Slow-command log: a genuinely slow command (fan-out stall, an
+      // O(entry) recompute on a huge hash) is a rare, high-signal event
+      // worth surfacing with the (redacted) key. Off by default.
+      if (slowCommandThresholdMs > 0 && durationMs >= slowCommandThresholdMs) {
+        logger.warn('command.slow', {
+          command,
+          durationMs: Math.round(durationMs * 100) / 100,
+          result: resultLabel,
+          key: keyArg !== undefined ? redactKey(keyArg) : undefined,
+        });
+      }
       span.end();
     }
   });

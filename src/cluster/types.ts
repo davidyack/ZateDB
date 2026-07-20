@@ -64,6 +64,99 @@ export interface ReplicationEvent {
   deletedMembers?: string[];
 }
 
+// ---- inbound event validation ---------------------------------------------
+//
+// Replication events arrive over the Service Bus topic as `message.body`,
+// i.e. untrusted `unknown` cast to ReplicationEvent — the type is a
+// compile-time lie for anything off the wire. Applying them bypasses
+// admission control (a peer already accepted the write), so a buggy or
+// compromised publisher inside the topic's trust boundary could otherwise
+// inject malformed or absurdly-large events straight into every node's
+// memory. validateReplicationEvent is the kind-discriminated, size-bounded
+// gate on that path. Bounds are sanity ceilings (well above any legitimate
+// value, below catastrophic), not functional limits.
+
+const MAX_EVENT_STRING = 64 * 1024 * 1024; // 64 MiB — far above the 8 MiB bulk-arg limit
+const MAX_EVENT_ARRAY = 1_000_000;
+
+function isEventString(x: unknown): x is string {
+  return typeof x === 'string' && x.length <= MAX_EVENT_STRING;
+}
+function isFiniteNumber(x: unknown): x is number {
+  return typeof x === 'number' && Number.isFinite(x);
+}
+function isValidSnapshot(x: unknown): x is EntrySnapshot {
+  if (typeof x !== 'object' || x === null) return false;
+  const s = x as Record<string, unknown>;
+  if (s.expiresAtMs !== null && !isFiniteNumber(s.expiresAtMs)) return false;
+  if (s.type === 'string') {
+    if (!isEventString(s.value)) return false;
+    if (s.contributions !== undefined && !isNumberRecord(s.contributions)) return false;
+    return true;
+  }
+  if (s.type === 'hash') return isRecordOf(s.fields, isEventString);
+  if (s.type === 'sortedset') return isNumberRecord(s.members);
+  return false;
+}
+function isRecordOf(x: unknown, valueOk: (v: unknown) => boolean): boolean {
+  if (typeof x !== 'object' || x === null) return false;
+  const entries = Object.entries(x as Record<string, unknown>);
+  if (entries.length > MAX_EVENT_ARRAY) return false;
+  return entries.every(([k, v]) => isEventString(k) && valueOk(v));
+}
+function isNumberRecord(x: unknown): boolean {
+  return isRecordOf(x, isFiniteNumber);
+}
+function isPairArray(x: unknown, valueOk: (v: unknown) => boolean): boolean {
+  if (!Array.isArray(x) || x.length > MAX_EVENT_ARRAY) return false;
+  return x.every((pair) => Array.isArray(pair) && pair.length === 2 && isEventString(pair[0]) && valueOk(pair[1]));
+}
+function isNameArray(x: unknown): boolean {
+  return Array.isArray(x) && x.length <= MAX_EVENT_ARRAY && x.every(isEventString);
+}
+
+/**
+ * Runtime-validates an off-the-wire replication event. Returns the event
+ * typed on success, or null if it's malformed / oversized (the caller drops
+ * and logs it). Optional per-kind fields are checked only when present.
+ */
+export function validateReplicationEvent(raw: unknown): ReplicationEvent | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const e = raw as Record<string, unknown>;
+  if (!isEventString(e.originNodeId) || !isFiniteNumber(e.seq) || !isFiniteNumber(e.timestampMs)) return null;
+
+  switch (e.kind) {
+    case 'upsert':
+      if (!isEventString(e.key) || !isValidSnapshot(e.entry)) return null;
+      break;
+    case 'delete':
+      if (!isEventString(e.key)) return null;
+      break;
+    case 'ttl':
+      if (!isEventString(e.key) || (e.expiresAtMs !== null && !isFiniteNumber(e.expiresAtMs))) return null;
+      break;
+    case 'increment':
+      if (!isEventString(e.key) || !isFiniteNumber(e.contributionTotal)) return null;
+      break;
+    case 'publish':
+      if (!isEventString(e.channel) || !isEventString(e.message)) return null;
+      break;
+    case 'hashField':
+      if (!isEventString(e.key)) return null;
+      if (e.setFields !== undefined && !isPairArray(e.setFields, isEventString)) return null;
+      if (e.deletedFields !== undefined && !isNameArray(e.deletedFields)) return null;
+      break;
+    case 'zsetMember':
+      if (!isEventString(e.key)) return null;
+      if (e.setMembers !== undefined && !isPairArray(e.setMembers, isFiniteNumber)) return null;
+      if (e.deletedMembers !== undefined && !isNameArray(e.deletedMembers)) return null;
+      break;
+    default:
+      return null; // unknown kind
+  }
+  return raw as ReplicationEvent;
+}
+
 export interface NodeSnapshot {
   nodeId: string;
   lastHeartbeatMs: number;

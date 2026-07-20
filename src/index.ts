@@ -5,7 +5,7 @@ import { RespServer } from './server/respServer.js';
 import { HealthServer } from './http/healthServer.js';
 import { AdminServer } from './http/adminServer.js';
 import { initTelemetry } from './telemetry/otel.js';
-import { bindKeyCountsSource, getCommandsProcessedTotal } from './telemetry/commandTelemetry.js';
+import { bindKeyCountsSource, bindSlowCommandThreshold, getCommandsProcessedTotal } from './telemetry/commandTelemetry.js';
 import { createClusterCoordinator } from './cluster/factory.js';
 import { initSaturationMetrics } from './telemetry/saturation.js';
 import { registerReplicationQueueGauge } from './telemetry/clusterMetrics.js';
@@ -51,6 +51,7 @@ async function main(): Promise<void> {
   });
   const pubsub = new PubSubRegistry();
   bindKeyCountsSource(() => store.keyCounts());
+  bindSlowCommandThreshold(config.slowCommandLogMs);
 
   // RespServer.activeConnectionCount() is only available once the server
   // exists, but the cluster coordinator's heartbeat needs it as a

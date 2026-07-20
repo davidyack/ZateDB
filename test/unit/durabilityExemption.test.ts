@@ -83,4 +83,22 @@ describe('short-TTL persistence exemption', () => {
     expect((durable.keys.get('c') as { contributions?: Record<string, number> }).contributions).toEqual({ 'node-a': 1 });
     expect(storeB.get('c')).toBe('2'); // peer still saw both increments
   });
+
+  it('EXPIRE-to-short still stamps the durable copy so it cannot outlive the key (F1)', async () => {
+    // Regression (F1): doPublishTtlChange used to SKIP the Cosmos patch when
+    // the new TTL was short. A key that was durable with no/long expiry then
+    // kept its OLD expiry in Cosmos, so hydration/anti-entropy could
+    // resurrect it long after every live node expired it.
+    dispatch(ctxA, ['SET', 'k', 'v']); // durable, no TTL
+    await clusterA.drain(1000);
+    expect(durable.keys.get('k')?.expiresAtMs).toBeNull();
+
+    dispatch(ctxA, ['EXPIRE', 'k', '5']); // 5s < 60s threshold — the tier transition
+    await clusterA.drain(1000);
+
+    const snap = durable.keys.get('k');
+    expect(snap).toBeDefined(); // still persisted (value kept)
+    expect(snap?.expiresAtMs).not.toBeNull(); // but now carries the short expiry -> Cosmos native TTL evicts it
+    expect(snap?.expiresAtMs! - Date.now()).toBeLessThanOrEqual(5000);
+  });
 });
