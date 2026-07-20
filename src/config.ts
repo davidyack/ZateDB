@@ -58,6 +58,18 @@ export interface ServerConfig {
    * 0 disables.
    */
   antiEntropyIntervalMs: number;
+  /**
+   * Persistence exemption for short-lived keys. A key whose remaining TTL is
+   * under this at replication time is NOT written to Cosmos DB — peers still
+   * converge via Service Bus (they don't read Cosmos for live replication),
+   * and the key would expire long before a restart could care about it. This
+   * removes the dominant Cosmos RU source (rate-limit / sliding-window churn)
+   * for data that was never durability-worthy. Trade-off: a *full-cluster*
+   * restart loses sub-threshold keys — the accepted contract for all data
+   * before persistence existed. 0 disables (everything is persisted); a
+   * sensible enabled value is ~60000 (see docs/high-availability.md).
+   */
+  durabilityMinTtlMs: number;
   /** How long startup (Cosmos DB / Service Bus connect + hydration) may take before failing fast instead of hanging indefinitely. */
   clusterStartupTimeoutMs: number;
   /**
@@ -124,6 +136,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     heartbeatIntervalMs: intFromEnv(env, 'HEARTBEAT_INTERVAL_MS', 10_000),
     nodeStaleMs: intFromEnv(env, 'NODE_STALE_MS', 30_000),
     antiEntropyIntervalMs: intFromEnv(env, 'ANTI_ENTROPY_INTERVAL_MS', 5 * 60_000),
+    durabilityMinTtlMs: intFromEnv(env, 'DURABILITY_MIN_TTL_MS', 0),
     clusterStartupTimeoutMs: intFromEnv(env, 'CLUSTER_STARTUP_TIMEOUT_MS', 30_000),
     shutdownHardLimitMs: intFromEnv(env, 'SHUTDOWN_HARD_LIMIT_MS', 10_000),
     requireHa: boolExact(env.REQUIRE_HA, false),

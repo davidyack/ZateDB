@@ -328,3 +328,43 @@ mode.
   is a base64url encoding of the key, with the original key kept verbatim
   in a `key` property (used as the partition key, which has no such
   restriction) — see [`src/cluster/cosmosDurableStore.ts`](../src/cluster/cosmosDurableStore.ts).
+
+## Cost
+
+Cosmos DB request units (RU) are the dominant marginal cost of this
+architecture; Service Bus operations and replica compute are secondary.
+Reads are free (always local). So the bill is essentially *mutating-write
+rate × whether we persist the write* — which is where the levers are.
+
+- **Short-TTL persistence exemption (`DURABILITY_MIN_TTL_MS`).** The
+  highest-write-rate keys — fixed-window rate-limit counters, sliding-window
+  zsets — live seconds to a minute and would expire long before any restart
+  or anti-entropy pass could read them back. Setting this threshold makes a
+  key whose *remaining TTL* is under it skip the Cosmos write entirely:
+  peers still converge over Service Bus (they never read Cosmos for live
+  replication), and hydration/anti-entropy simply never see a key that would
+  be dead anyway. This removes the dominant RU source outright rather than
+  optimising it. **Trade-off:** a *full-cluster* restart loses sub-threshold
+  keys — which was the accepted contract for *all* data before persistence
+  existed, and is the right trade for a rate-limit counter that resets in
+  seconds. Keys with no TTL, or a TTL above the threshold, are always
+  persisted; deletes are always durable. Off by default (`0`); a sensible
+  enabled value is `60000`, but derive it from a load test (see below).
+- **Native TTL caps storage.** Every durable document carries a Cosmos `ttl`
+  derived from its expiry, so dead keys self-evict (see Operational notes) —
+  storage is self-limiting even for the keys that *are* persisted.
+- **Coalescing caps write frequency.** A burst of same-key writes collapses
+  to the latest before the round trip (see the Replication section), so a
+  hot counter costs roughly one durable write per drain, not one per command.
+
+**Right-sizing.** The numeric threshold above, the Cosmos capacity mode
+(serverless vs. provisioned/autoscale), and replica count/size should be
+derived from a representative load test with RU metering on, not guessed —
+serverless bills per request and wins at low/bursty RU, while autoscale
+provisioned throughput wins once sustained RU/s clears a few hundred. Set a
+custom Cosmos **indexing policy** on the `keys` container that indexes only
+the paths queries actually touch (`/key`, `/updatedAtMs`, `/entry/expiresAtMs`)
+and excludes the rest — the default policy indexes every field of every hash
+and every member of every zset, and write RU scales with indexed paths, so
+this is typically a several-fold write-RU reduction for pure infra config.
+See [Deployment](./deployment.md) for the env surface.

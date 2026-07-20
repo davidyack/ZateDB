@@ -45,6 +45,12 @@ export interface ClusterCoordinatorDeps {
    */
   antiEntropyIntervalMs?: number;
   /**
+   * Keys whose remaining TTL is under this at replication time skip the
+   * Cosmos write (Service Bus still carries them to peers). 0/unset persists
+   * everything. See config.durabilityMinTtlMs.
+   */
+  durabilityMinTtlMs?: number;
+  /**
    * Invoked when the replication transport reports an unrecoverable receive
    * condition (subscription gone / sustained errors). The process owner
    * wires this to a fatal shutdown so a restart re-creates the subscription
@@ -154,6 +160,18 @@ export class ClusterCoordinator {
   }
 
   /**
+   * True when a key with this expiry is too short-lived to be worth a Cosmos
+   * write: peers still converge over Service Bus, and the key would expire
+   * long before any restart/anti-entropy pass could read it back. Keys with
+   * no TTL are always durable. See config.durabilityMinTtlMs.
+   */
+  private skipDurableForTtl(expiresAtMs: number | null | undefined): boolean {
+    const min = this.deps.durabilityMinTtlMs ?? 0;
+    if (min <= 0 || expiresAtMs === null || expiresAtMs === undefined) return false;
+    return expiresAtMs - Date.now() < min;
+  }
+
+  /**
    * Anti-entropy backstop: re-load every durable key written since the last
    * pass and apply it locally, repairing anything this node missed while
    * replication was briefly broken (a partition past the message TTL, a
@@ -258,10 +276,12 @@ export class ClusterCoordinator {
   }
 
   private async doPublishTtlChange(key: string, expiresAtMs: number | null): Promise<void> {
-    await Promise.all([
-      this.deps.durable.putTtl(key, expiresAtMs),
-      this.deps.transport.publish(this.makeEvent({ kind: 'ttl', key, expiresAtMs })),
-    ]);
+    const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'ttl', key, expiresAtMs }));
+    if (this.skipDurableForTtl(expiresAtMs)) {
+      await broadcast; // the EXPIRE that just made this key short-lived — no point persisting the TTL either
+    } else {
+      await Promise.all([this.deps.durable.putTtl(key, expiresAtMs), broadcast]);
+    }
   }
 
   /**
@@ -282,10 +302,15 @@ export class ClusterCoordinator {
   }
 
   private async doPublishIncrement(key: string, total: number): Promise<void> {
-    await Promise.all([
-      this.deps.durable.putIncrement(key, this.nodeId, total),
-      this.deps.transport.publish(this.makeEvent({ kind: 'increment', key, contributionTotal: total })),
-    ]);
+    const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'increment', key, contributionTotal: total }));
+    // The dominant RU source: a hot rate-limit counter with a short TTL. Once
+    // its TTL is under the threshold, peers keep converging over Service Bus
+    // and we stop paying to persist a value that resets in seconds.
+    if (this.skipDurableForTtl(this.deps.store.getRawEntry(key)?.expiresAtMs)) {
+      await broadcast;
+    } else {
+      await Promise.all([this.deps.durable.putIncrement(key, this.nodeId, total), broadcast]);
+    }
   }
 
   private async doPublishKeyChange(key: string, entry: ReturnType<Store['getRawEntry']>): Promise<void> {
@@ -293,13 +318,17 @@ export class ClusterCoordinator {
     // peers apply the broadcast event directly, they don't read it back
     // from Cosmos — so they run concurrently rather than back-to-back.
     if (entry === undefined) {
+      // Deletes stay durable regardless of TTL exemption — cheap, rare, and
+      // skipping one could leave a doc for anti-entropy/hydration to resurrect.
       await Promise.all([this.deps.durable.deleteKey(key), this.deps.transport.publish(this.makeEvent({ kind: 'delete', key }))]);
     } else {
       const snapshot = entryToSnapshot(entry);
-      await Promise.all([
-        this.deps.durable.putKey(key, snapshot),
-        this.deps.transport.publish(this.makeEvent({ kind: 'upsert', key, entry: snapshot })),
-      ]);
+      const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'upsert', key, entry: snapshot }));
+      if (this.skipDurableForTtl(entry.expiresAtMs)) {
+        await broadcast; // short-TTL key: peers get it over Service Bus; skip the Cosmos RU
+      } else {
+        await Promise.all([this.deps.durable.putKey(key, snapshot), broadcast]);
+      }
     }
   }
 
@@ -318,10 +347,11 @@ export class ClusterCoordinator {
   }
 
   private async doPublishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): Promise<void> {
-    const tasks: Array<Promise<unknown>> = [];
-    if (setFields.length > 0) tasks.push(this.deps.durable.putHashFields(key, setFields));
-    if (deletedFields.length > 0) tasks.push(this.deps.durable.deleteHashFields(key, deletedFields));
-    tasks.push(this.deps.transport.publish(this.makeEvent({ kind: 'hashField', key, setFields, deletedFields })));
+    const tasks: Array<Promise<unknown>> = [this.deps.transport.publish(this.makeEvent({ kind: 'hashField', key, setFields, deletedFields }))];
+    if (!this.skipDurableForTtl(this.deps.store.getRawEntry(key)?.expiresAtMs)) {
+      if (setFields.length > 0) tasks.push(this.deps.durable.putHashFields(key, setFields));
+      if (deletedFields.length > 0) tasks.push(this.deps.durable.deleteHashFields(key, deletedFields));
+    }
     await Promise.all(tasks);
   }
 
@@ -332,10 +362,11 @@ export class ClusterCoordinator {
   }
 
   private async doPublishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): Promise<void> {
-    const tasks: Array<Promise<unknown>> = [];
-    if (setMembers.length > 0) tasks.push(this.deps.durable.putZsetMembers(key, setMembers));
-    if (deletedMembers.length > 0) tasks.push(this.deps.durable.deleteZsetMembers(key, deletedMembers));
-    tasks.push(this.deps.transport.publish(this.makeEvent({ kind: 'zsetMember', key, setMembers, deletedMembers })));
+    const tasks: Array<Promise<unknown>> = [this.deps.transport.publish(this.makeEvent({ kind: 'zsetMember', key, setMembers, deletedMembers }))];
+    if (!this.skipDurableForTtl(this.deps.store.getRawEntry(key)?.expiresAtMs)) {
+      if (setMembers.length > 0) tasks.push(this.deps.durable.putZsetMembers(key, setMembers));
+      if (deletedMembers.length > 0) tasks.push(this.deps.durable.deleteZsetMembers(key, deletedMembers));
+    }
     await Promise.all(tasks);
   }
 
