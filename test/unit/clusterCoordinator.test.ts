@@ -90,6 +90,156 @@ describe('ClusterCoordinator HA mode: hydration', () => {
   });
 });
 
+describe('ClusterCoordinator HA mode: hydration filtering & bounding', () => {
+  function buildNode(durable: FakeDurableStore, store: Store, maxMemoryBytes?: number): ClusterCoordinator {
+    return new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport: new FakeReplicationHub().createTransport('node-h'),
+      nodeId: 'node-h',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      maxMemoryBytes,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+  }
+
+  it('skips already-expired durable keys during hydration', async () => {
+    const durable = new FakeDurableStore();
+    await durable.putKey('live', { type: 'string', value: 'v', expiresAtMs: Date.now() + 60_000 });
+    await durable.putKey('dead', { type: 'string', value: 'v', expiresAtMs: Date.now() - 1 });
+    await durable.putKey('forever', { type: 'string', value: 'v', expiresAtMs: null });
+
+    const store = new Store(0);
+    const cluster = buildNode(durable, store);
+    await cluster.start();
+
+    expect(store.exists('live')).toBe(true);
+    expect(store.exists('forever')).toBe(true);
+    expect(store.exists('dead')).toBe(false); // never resurrected
+    expect(store.keyCounts().string).toBe(2);
+
+    await cluster.stop();
+    store.close();
+  });
+
+  it('stops hydrating once the loaded estimate crosses maxMemoryBytes (no restart-loop OOM)', async () => {
+    const durable = new FakeDurableStore();
+    for (let i = 0; i < 10; i++) {
+      await durable.putKey(`k${i}`, { type: 'string', value: 'x'.repeat(100), expiresAtMs: null });
+    }
+
+    const store = new Store(0);
+    // A tiny ceiling: the first key loads (estimate starts at 0), then the
+    // next check trips the bound — so we get a partial, bounded hydration
+    // rather than loading all 10 and OOMing.
+    const cluster = buildNode(durable, store, 1);
+    await cluster.start();
+
+    expect(cluster.isHydrated).toBe(true); // still becomes ready
+    expect(store.keyCounts().string).toBeLessThan(10); // but did NOT load everything
+
+    await cluster.stop();
+    store.close();
+  });
+});
+
+describe('ClusterCoordinator HA mode: anti-entropy & fatal detection', () => {
+  it('reconcile() re-applies durable writes this node missed while replication was broken', async () => {
+    const durable = new FakeDurableStore();
+    await durable.putKey('seeded', { type: 'string', value: 'v0', expiresAtMs: null });
+
+    const store = new Store(0);
+    const cluster = new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport: new FakeReplicationHub().createTransport('node-x'),
+      nodeId: 'node-x',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+    await cluster.start();
+    expect(store.get('seeded')).toBe('v0');
+
+    // A peer wrote a new key straight to the durable store, but this node
+    // never got the replication event (simulated: nothing delivered). Stamp
+    // its watermark in the future so it's unambiguously newer than the
+    // post-hydration sync point.
+    durable.keys.set('missed', { type: 'string', value: 'peer-write', expiresAtMs: null });
+    durable.setUpdatedAt('missed', Date.now() + 1_000_000);
+    expect(store.exists('missed')).toBe(false); // not seen yet
+
+    await cluster.reconcile();
+    expect(store.get('missed')).toBe('peer-write'); // convergence backstop repaired it
+
+    await cluster.stop();
+    store.close();
+  });
+
+  it('reconcile() skips durable rows that are already expired', async () => {
+    const durable = new FakeDurableStore();
+    const store = new Store(0);
+    const cluster = new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport: new FakeReplicationHub().createTransport('node-x'),
+      nodeId: 'node-x',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+    await cluster.start();
+
+    durable.keys.set('dead', { type: 'string', value: 'v', expiresAtMs: Date.now() - 1 });
+    durable.setUpdatedAt('dead', Date.now() + 1_000_000);
+    await cluster.reconcile();
+    expect(store.exists('dead')).toBe(false);
+
+    await cluster.stop();
+    store.close();
+  });
+
+  it('calls onFatalReplicationError when the transport reports an unrecoverable receive condition', async () => {
+    const durable = new FakeDurableStore();
+    const store = new Store(0);
+    const transport = new FakeReplicationHub().createTransport('node-x');
+    let fatal: Error | null = null;
+    const cluster = new ClusterCoordinator({
+      store,
+      pubsub: new PubSubRegistry(),
+      durable,
+      transport,
+      nodeId: 'node-x',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      onFatalReplicationError: (err) => {
+        fatal = err;
+      },
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+    await cluster.start();
+
+    transport.simulateFatal(new Error('subscription vanished'));
+    expect(fatal).not.toBeNull();
+    expect((fatal as unknown as Error).message).toBe('subscription vanished');
+
+    await cluster.stop();
+    store.close();
+  });
+});
+
 describe('ClusterCoordinator HA mode: cross-node convergence', () => {
   let durable: FakeDurableStore;
   let hub: FakeReplicationHub;
@@ -130,13 +280,71 @@ describe('ClusterCoordinator HA mode: cross-node convergence', () => {
     storeB.close();
   });
 
-  it('replicates a mutation applied on one node to the other node\'s in-memory copy', async () => {
-    storeA.incr('counter'); // simulates a command handler's local mutation, already applied
-    clusterA.publishKeyChange('counter'); // what the dispatcher does right after
+  it('replicates a SET mutation applied on one node to the other node\'s in-memory copy', async () => {
+    storeA.set('k', 'v'); // simulates a command handler's local mutation, already applied
+    clusterA.publishKeyChange('k'); // what the dispatcher does right after
+
+    await waitFor(() => storeB.get('k') === 'v');
+    expect(storeB.get('k')).toBe('v');
+    expect(durable.keys.get('k')).toEqual({ type: 'string', value: 'v', expiresAtMs: null });
+  });
+
+  it('replicates an INCR as a per-origin G-counter contribution', async () => {
+    storeA.incr('counter', 'node-a'); // local INCR attributed to this node
+    clusterA.publishIncrement('counter'); // what the dispatcher does right after
 
     await waitFor(() => storeB.get('counter') === '1');
     expect(storeB.get('counter')).toBe('1');
-    expect(durable.keys.get('counter')).toEqual({ type: 'string', value: '1', expiresAtMs: null });
+    // The durable snapshot records the contribution per origin, not an absolute value.
+    expect(durable.keys.get('counter')).toEqual({
+      type: 'string',
+      value: '1',
+      expiresAtMs: null,
+      contributions: { 'node-a': 1 },
+    });
+  });
+
+  it('replicates an EXPIRE as a TTL-only change to the other node', async () => {
+    storeA.set('k', 'v');
+    clusterA.publishKeyChange('k');
+    await waitFor(() => storeB.get('k') === 'v');
+
+    const at = Date.now() + 600_000;
+    storeA.pexpire('k', 600_000);
+    clusterA.publishTtlChange('k', at);
+
+    await waitFor(() => storeB.getKeyDetail('k')?.info.ttlMsRemaining != null);
+    expect(storeB.get('k')).toBe('v'); // value untouched, only the TTL was replicated
+    // The durable snapshot keeps its value and gains the expiry.
+    expect(durable.keys.get('k')).toEqual({ type: 'string', value: 'v', expiresAtMs: at });
+  });
+
+  it('concurrent cross-node INCRs converge on the SUM, not last-write-wins (G-counter)', async () => {
+    // The flagship fix: with absolute last-write-wins replication, A doing 2
+    // and B doing 3 on the same counter would converge on whichever wrote
+    // last (2 or 3) — undercounting exactly when rate limiting matters most.
+    // Per-origin contributions sum to the true 5 on both nodes.
+    storeA.incr('rl', 'node-a');
+    clusterA.publishIncrement('rl');
+    storeA.incr('rl', 'node-a');
+    clusterA.publishIncrement('rl');
+
+    storeB.incr('rl', 'node-b');
+    clusterB.publishIncrement('rl');
+    storeB.incr('rl', 'node-b');
+    clusterB.publishIncrement('rl');
+    storeB.incr('rl', 'node-b');
+    clusterB.publishIncrement('rl');
+
+    await waitFor(() => storeA.get('rl') === '5' && storeB.get('rl') === '5');
+    expect(storeA.get('rl')).toBe('5');
+    expect(storeB.get('rl')).toBe('5');
+    expect(durable.keys.get('rl')).toEqual({
+      type: 'string',
+      value: '5',
+      expiresAtMs: null,
+      contributions: { 'node-a': 2, 'node-b': 3 },
+    });
   });
 
   it('replicates a delete', async () => {

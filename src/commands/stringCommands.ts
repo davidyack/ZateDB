@@ -73,7 +73,11 @@ export function del(ctx: CommandContext, args: string[]): CommandResult {
 export function incr(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length !== 1) return result(wrongArgsError('incr'));
   try {
-    return result(integer(ctx.store.incr(args[0])));
+    // Attribute the increment to this node so INCR replicates as a
+    // per-origin G-counter contribution (see Store.incr / the dispatcher's
+    // increment-replication path). In standalone mode there's a single
+    // origin, so the sum is just the count.
+    return result(integer(ctx.store.incr(args[0], ctx.cluster.nodeId)));
   } catch (e) {
     return result(toRespError(e));
   }

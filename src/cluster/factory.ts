@@ -13,6 +13,8 @@ export interface ClusterCoordinatorHostDeps {
   pubsub: PubSubRegistry;
   connectionCount(): number;
   commandsTotal(): number;
+  /** Wired by the process owner (index.ts) to a fatal shutdown when replication dies unrecoverably. */
+  onFatalReplicationError?: (err: Error) => void;
 }
 
 /**
@@ -41,6 +43,22 @@ export async function createClusterCoordinator(
     });
   }
 
+  // Split-brain guard. When REQUIRE_HA is set (the multi-replica Bicep sets
+  // it), refuse to run standalone: at minReplicas >= 2, silently falling
+  // back to standalone on a partial or missing HA config yields several
+  // independent, non-replicating nodes behind one connection-spraying load
+  // balancer — divergent per-connection keyspaces, the exact correctness
+  // failure the single-replica invariant existed to prevent. Crash-looping
+  // is strictly safer than serving that silently.
+  if (config.requireHa && !haEnabled) {
+    throw new Error(
+      'REQUIRE_HA is set but high availability is not fully configured ' +
+        `(Cosmos DB configured: ${hasDurableStore}, Service Bus configured: ${hasTransport}). ` +
+        'Both COSMOS_CONNECTION_STRING/COSMOS_ENDPOINT and SERVICE_BUS_CONNECTION_STRING must be set, ' +
+        'or unset REQUIRE_HA to allow standalone (single-node) mode.',
+    );
+  }
+
   let durable: DurableStore;
   let transport: ReplicationTransport;
 
@@ -55,7 +73,8 @@ export async function createClusterCoordinator(
     });
     const { ServiceBusReplicationTransport } = await import('./serviceBusTransport.js');
     transport = new ServiceBusReplicationTransport({
-      connectionString: config.serviceBusConnectionString as string,
+      connectionString: config.serviceBusConnectionString,
+      fullyQualifiedNamespace: config.serviceBusFullyQualifiedNamespace,
       topicName: config.serviceBusTopicName,
       nodeId,
     });
@@ -73,6 +92,9 @@ export async function createClusterCoordinator(
     haEnabled,
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     nodeStaleMs: config.nodeStaleMs,
+    maxMemoryBytes: config.maxMemoryBytes,
+    antiEntropyIntervalMs: config.antiEntropyIntervalMs,
+    onFatalReplicationError: deps.onFatalReplicationError,
     connectionCount: deps.connectionCount,
     commandsTotal: deps.commandsTotal,
   });

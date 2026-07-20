@@ -30,11 +30,29 @@ interface CommandSpec {
    * through the generic whole-key `mutatedKeys` path.
    */
   fieldReplication?: 'hash' | 'zset';
+  /**
+   * EXPIRE/PEXPIRE replicate only the key's new TTL, not a whole-entry
+   * snapshot — otherwise an EXPIRE on a hash/sorted set would ship (and
+   * overwrite peers with) the entire entry, clobbering field/member writes
+   * those peers hold but this node hasn't received yet. Routes to the
+   * TTL-only path (ClusterCoordinator.publishTtlChange) instead of the
+   * whole-key `mutatedKeys` path.
+   */
+  ttlReplication?: boolean;
+  /**
+   * INCR replicates as a commutative per-origin G-counter contribution, not
+   * a whole-key last-write-wins upsert — otherwise concurrent cross-node
+   * increments undercount under contention (the flagship rate-limit
+   * failure). Routes to ClusterCoordinator.publishIncrement.
+   */
+  incrementReplication?: boolean;
 }
 
 function spec(
   handler: CommandHandler,
-  opts: Partial<Pick<CommandSpec, 'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys' | 'fieldReplication'>> = {},
+  opts: Partial<
+    Pick<CommandSpec, 'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys' | 'fieldReplication' | 'ttlReplication' | 'incrementReplication'>
+  > = {},
 ): CommandSpec {
   return {
     handler,
@@ -42,6 +60,8 @@ function spec(
     allowedInSubscriberMode: opts.allowedInSubscriberMode ?? false,
     mutatedKeys: opts.mutatedKeys,
     fieldReplication: opts.fieldReplication,
+    ttlReplication: opts.ttlReplication,
+    incrementReplication: opts.incrementReplication,
   };
 }
 
@@ -58,9 +78,9 @@ const COMMANDS: Record<string, CommandSpec> = {
   GET: spec(stringCommands.get),
   SET: spec(stringCommands.set, { mutatedKeys: singleKey }),
   DEL: spec(stringCommands.del, { mutatedKeys: allArgsAsKeys }),
-  INCR: spec(stringCommands.incr, { mutatedKeys: singleKey }),
-  EXPIRE: spec(stringCommands.expire, { mutatedKeys: singleKey }),
-  PEXPIRE: spec(stringCommands.pexpire, { mutatedKeys: singleKey }),
+  INCR: spec(stringCommands.incr, { incrementReplication: true }),
+  EXPIRE: spec(stringCommands.expire, { ttlReplication: true }),
+  PEXPIRE: spec(stringCommands.pexpire, { ttlReplication: true }),
 
   HSET: spec(hashCommands.hset, { fieldReplication: 'hash' }),
   HDEL: spec(hashCommands.hdel, { fieldReplication: 'hash' }),
@@ -175,6 +195,12 @@ function replicateFieldLevelMutation(ctx: CommandContext, command: string, args:
   }
 }
 
+/** True when a command's reply is the integer `:1` — how EXPIRE/PEXPIRE signal "the TTL was actually applied". */
+function didApply(outcome: CommandResult): boolean {
+  const frame = outcome.frames[0];
+  return frame?.type === 'integer' && frame.value === 1;
+}
+
 export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcome {
   const command = (rawArgs[0] ?? '').toUpperCase();
   const args = rawArgs.slice(1);
@@ -224,6 +250,20 @@ export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcom
       ctx.cluster.publishMessage(args[0], args[1]);
     } else if (replicatingFields && fieldPrep) {
       replicateFieldLevelMutation(ctx, command, args, fieldPrep);
+    } else if (ctx.cluster.haEnabled && cmdSpec.incrementReplication) {
+      // INCR always mutates (creates or increments), so there's no no-op to
+      // filter — replicate this node's new cumulative contribution.
+      ctx.cluster.publishIncrement(args[0]);
+    } else if (ctx.cluster.haEnabled && cmdSpec.ttlReplication) {
+      // Replicate only when the TTL actually changed. EXPIRE/PEXPIRE reply
+      // :1 when they applied and :0 when they didn't (key absent, or an
+      // NX/XX/GT/LT flag condition not met) — a :0 changed nothing here, so
+      // replicating it would be a wasted write at best and, for the
+      // key-absent case, a phantom TTL for a key another node may hold.
+      const key = args[0];
+      if (didApply(outcome) && ctx.store.exists(key)) {
+        ctx.cluster.publishTtlChange(key, ctx.store.getRawEntry(key)?.expiresAtMs ?? null);
+      }
     } else if (replicatingWholeKey) {
       candidateKeys.forEach((key, i) => {
         if (existedBefore[i] || ctx.store.exists(key)) ctx.cluster.publishKeyChange(key);

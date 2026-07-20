@@ -14,11 +14,37 @@ export interface DurableStore {
   /** Every live key snapshot, for startup hydration. */
   loadAll(): Promise<Array<{ key: string; entry: EntrySnapshot }>>;
 
-  /** Upserts the whole post-mutation state of a key (last-write-wins across nodes) — used for SET/INCR/EXPIRE/PEXPIRE. */
+  /**
+   * Live key snapshots written since `sinceMs` (by `updatedAtMs`), for
+   * periodic anti-entropy re-hydration — a cheap convergence backstop that
+   * repairs anything a node missed while replication was briefly broken
+   * (a partition past the message TTL, a receiver blip). Each row carries
+   * its `updatedAtMs` so the caller can advance its watermark.
+   */
+  loadChangedSince(sinceMs: number): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>>;
+
+  /** Upserts the whole post-mutation state of a key (last-write-wins across nodes) — used for SET/DEL. */
   putKey(key: string, entry: EntrySnapshot): Promise<void>;
+
+  /**
+   * Persists one origin's cumulative contribution to a counter key (INCR)
+   * without touching any other origin's — the durable counterpart of the
+   * in-memory G-counter, so two nodes incrementing the same counter
+   * concurrently both survive instead of last-write-wins clobbering. Set to
+   * the running total (idempotent), not added. Creates the counter if absent.
+   */
+  putIncrement(key: string, originId: string, originTotal: number): Promise<void>;
 
   /** Permanently removes a key. Idempotent — a missing key is not an error. */
   deleteKey(key: string): Promise<void>;
+
+  /**
+   * Updates only a key's TTL (EXPIRE/PEXPIRE) without rewriting its
+   * value/fields/members — the durable-store counterpart of
+   * Store.applyReplicatedTtl, so a TTL change never clobbers concurrently
+   * persisted field/member writes. A no-op if the key doesn't exist.
+   */
+  putTtl(key: string, expiresAtMs: number | null): Promise<void>;
 
   /**
    * Sets specific hash fields without touching any other field on the
@@ -56,9 +82,17 @@ export class NullDurableStore implements DurableStore {
     return [];
   }
 
+  async loadChangedSince(): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>> {
+    return [];
+  }
+
   async putKey(): Promise<void> {}
 
+  async putIncrement(): Promise<void> {}
+
   async deleteKey(): Promise<void> {}
+
+  async putTtl(): Promise<void> {}
 
   async putHashFields(): Promise<void> {}
 

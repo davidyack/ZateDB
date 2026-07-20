@@ -33,13 +33,18 @@ interface CosmosPatchOperation {
   value?: unknown;
 }
 interface CosmosItemLike {
+  read<T = Record<string, unknown>>(): Promise<{ resource?: T }>;
   delete(): Promise<unknown>;
   patch(operations: CosmosPatchOperation[]): Promise<unknown>;
+}
+interface CosmosQueryParameter {
+  name: string;
+  value: unknown;
 }
 interface CosmosContainerLike {
   items: {
     upsert(body: Record<string, unknown>): Promise<unknown>;
-    query<T>(spec: { query: string }, options?: { maxItemCount?: number }): CosmosQueryIterator<T>;
+    query<T>(spec: { query: string; parameters?: CosmosQueryParameter[] }, options?: { maxItemCount?: number }): CosmosQueryIterator<T>;
   };
   item(id: string, partitionKey: string): CosmosItemLike;
 }
@@ -70,8 +75,27 @@ function isNotFound(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 404;
 }
 
+/** A 400 from Cosmos — e.g. patching a nested path whose parent object doesn't exist yet (a counter first created by a plain SET). */
+function isBadRequest(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 400;
+}
+
 /** Cosmos DB's documented limit on the number of operations in a single Patch request. */
 const PATCH_BATCH_SIZE = 10;
+
+/**
+ * Cosmos native document TTL (seconds relative to the document's last
+ * write) derived from our absolute `expiresAtMs`. A value of -1 means "no
+ * expiry" (the doc lives until explicitly deleted, provided the container's
+ * DefaultTimeToLive is enabled/on). Deriving TTL from write time is a close
+ * approximation of the absolute expiry and — crucially — lets Cosmos itself
+ * evict dead keys, so the keys container doesn't grow monotonically with
+ * every expired counter/window and hydration doesn't re-load them forever.
+ */
+function cosmosTtlSeconds(expiresAtMs: number | null): number {
+  if (expiresAtMs === null) return -1;
+  return Math.max(1, Math.ceil((expiresAtMs - Date.now()) / 1000));
+}
 
 interface FieldOp {
   name: string;
@@ -121,8 +145,17 @@ export class CosmosDurableStore implements DurableStore {
   }
 
   async loadAll(): Promise<Array<{ key: string; entry: EntrySnapshot }>> {
+    // Exclude already-expired keys from hydration: even with native TTL
+    // enabled, Cosmos deletes lazily (a background sweep, up to minutes
+    // late), so a doc can still be queryable past its expiry. Loading it
+    // would resurrect a dead key and pay to hold it. Belt-and-suspenders
+    // with the coordinator's own expiry check on the returned snapshots.
     const iterator = this.keysContainer.items.query<{ key: string; entry: EntrySnapshot }>(
-      { query: 'SELECT c.key, c.entry FROM c' },
+      {
+        query:
+          'SELECT c.key, c.entry FROM c WHERE NOT IS_DEFINED(c.entry.expiresAtMs) OR IS_NULL(c.entry.expiresAtMs) OR c.entry.expiresAtMs > @now',
+        parameters: [{ name: '@now', value: Date.now() }],
+      },
       { maxItemCount: 500 },
     );
     const results: Array<{ key: string; entry: EntrySnapshot }> = [];
@@ -133,8 +166,88 @@ export class CosmosDurableStore implements DurableStore {
     return results;
   }
 
+  async loadChangedSince(sinceMs: number): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>> {
+    const now = Date.now();
+    const iterator = this.keysContainer.items.query<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>(
+      {
+        query:
+          'SELECT c.key, c.entry, c.updatedAtMs FROM c WHERE c.updatedAtMs > @since AND (NOT IS_DEFINED(c.entry.expiresAtMs) OR IS_NULL(c.entry.expiresAtMs) OR c.entry.expiresAtMs > @now)',
+        parameters: [
+          { name: '@since', value: sinceMs },
+          { name: '@now', value: now },
+        ],
+      },
+      { maxItemCount: 500 },
+    );
+    const results: Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }> = [];
+    while (iterator.hasMoreResults()) {
+      const { resources } = await iterator.fetchNext();
+      for (const r of resources) results.push(r);
+    }
+    return results;
+  }
+
   async putKey(key: string, entry: EntrySnapshot): Promise<void> {
-    await this.keysContainer.items.upsert({ id: toDocId(key), key, entry, updatedAtMs: Date.now() });
+    await this.keysContainer.items.upsert({
+      id: toDocId(key),
+      key,
+      entry,
+      updatedAtMs: Date.now(),
+      ttl: cosmosTtlSeconds(entry.expiresAtMs),
+    });
+  }
+
+  async putIncrement(key: string, originId: string, originTotal: number): Promise<void> {
+    const id = toDocId(key);
+    const now = Date.now();
+    try {
+      // Per-origin field set — commutative and idempotent across nodes, so
+      // two nodes incrementing the same counter never clobber each other.
+      await this.keysContainer.item(id, key).patch([
+        { op: 'set', path: `/entry/contributions/${escapeJsonPointerSegment(originId)}`, value: originTotal },
+        { op: 'set', path: '/updatedAtMs', value: now },
+      ]);
+    } catch (err) {
+      if (!isNotFound(err) && !isBadRequest(err)) throw err;
+      // The document is missing (404) or has no /entry/contributions parent
+      // yet (a counter first created by a plain SET — a BadRequest). Seed it:
+      // read the current state, merge this origin's total in, and upsert.
+      // Same-origin increments are serialized upstream (per-key queue), so
+      // this read-modify-write only races other origins in this rare
+      // first-time window, resolving last-write-wins there.
+      const existing = isNotFound(err) ? undefined : (await this.keysContainer.item(id, key).read<{ entry?: { value?: string; contributions?: Record<string, number>; expiresAtMs?: number | null } }>()).resource;
+      const contributions: Record<string, number> = { ...(existing?.entry?.contributions ?? {}) };
+      const seed = existing?.entry?.value;
+      if (contributions[''] === undefined && seed !== undefined && /^-?\d+$/.test(seed) && Number(seed) !== 0) {
+        contributions[''] = Number(seed);
+      }
+      contributions[originId] = originTotal;
+      let total = 0;
+      for (const n of Object.values(contributions)) total += n;
+      await this.keysContainer.items.upsert({
+        id,
+        key,
+        entry: { type: 'string', value: String(total), contributions, expiresAtMs: existing?.entry?.expiresAtMs ?? null },
+        updatedAtMs: now,
+        ttl: cosmosTtlSeconds(existing?.entry?.expiresAtMs ?? null),
+      });
+    }
+  }
+
+  async putTtl(key: string, expiresAtMs: number | null): Promise<void> {
+    // TTL-only update: patch the stored expiry and the native `ttl` so the
+    // whole entry (value/fields/members) is left untouched — the durable
+    // counterpart of replicating EXPIRE/PEXPIRE as a TTL-only event rather
+    // than a whole-entry upsert. A 404 means the key isn't persisted here;
+    // EXPIRE can't create a key, so there's nothing to patch — no fallback.
+    try {
+      await this.keysContainer.item(toDocId(key), key).patch([
+        { op: 'set', path: '/entry/expiresAtMs', value: expiresAtMs },
+        { op: 'set', path: '/ttl', value: cosmosTtlSeconds(expiresAtMs) },
+      ]);
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
   }
 
   async deleteKey(key: string): Promise<void> {
@@ -155,6 +268,7 @@ export class CosmosDurableStore implements DurableStore {
         key,
         entry: { type: 'hash', fields: Object.fromEntries(fields), expiresAtMs: null },
         updatedAtMs: Date.now(),
+        ttl: -1,
       }),
     );
   }
@@ -178,6 +292,7 @@ export class CosmosDurableStore implements DurableStore {
         key,
         entry: { type: 'sortedset', members: Object.fromEntries(members), expiresAtMs: null },
         updatedAtMs: Date.now(),
+        ttl: -1,
       }),
     );
   }

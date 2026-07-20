@@ -33,11 +33,24 @@ describe('loadConfig', () => {
     expect(config.ttlSweepIntervalMs).toBe(5000);
     expect(config.authPassword).toBeNull();
     expect(config.adminToken).toBeNull();
+    expect(config.shutdownHardLimitMs).toBe(10_000);
+    expect(config.maxFailedAuthAttempts).toBe(5);
   });
 
   it('falls back to the default when a numeric env value is not a number', () => {
     const config = loadConfig({ RESP_PORT: 'not-a-port' } as unknown as NodeJS.ProcessEnv);
     expect(config.respPort).toBe(6379);
+  });
+
+  it('parses REQUIRE_HA as a strict boolean (only literal "true" enables it)', () => {
+    expect(loadConfig({} as NodeJS.ProcessEnv).requireHa).toBe(false);
+    expect(loadConfig({ REQUIRE_HA: 'true' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(true);
+    expect(loadConfig({ REQUIRE_HA: 'TRUE' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(true);
+    // Anything that isn't "true" leaves it off — a fat-fingered value must
+    // never accidentally *relax* the guard, but also never silently enable it.
+    expect(loadConfig({ REQUIRE_HA: 'false' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(false);
+    expect(loadConfig({ REQUIRE_HA: '1' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(false);
+    expect(loadConfig({ REQUIRE_HA: '' } as unknown as NodeJS.ProcessEnv).requireHa).toBe(false);
   });
 });
 
@@ -70,5 +83,14 @@ describe('isHaConfigured', () => {
       SERVICE_BUS_CONNECTION_STRING: 'Endpoint=sb://x',
     } as unknown as NodeJS.ProcessEnv);
     expect(isHaConfigured(config)).toBe(true);
+  });
+
+  it('accepts a Service Bus namespace (managed identity) in place of a connection string', () => {
+    const config = loadConfig({
+      COSMOS_ENDPOINT: 'https://x.documents.azure.com',
+      SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE: 'my-ns.servicebus.windows.net',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(config.serviceBusFullyQualifiedNamespace).toBe('my-ns.servicebus.windows.net');
+    expect(isHaConfigured(config)).toBe(true); // fully managed-identity HA, no secrets
   });
 });

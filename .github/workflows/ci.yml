@@ -18,3 +18,24 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      # Dependency advisory scan across the full runtime tree (the runtime
+      # image ships optionalDependencies too — the @azure/* and OTel exporter
+      # trees). Non-blocking for now: there is a pre-existing high advisory in
+      # a transitive OTel package (@opentelemetry/sdk-node's Prometheus
+      # exporter, which this service does not use), and forcing it red would
+      # block unrelated work. It stays visible in the job log so a genuinely
+      # new advisory is noticed; tighten to blocking once the transitive tree
+      # is bumped clean.
+      - name: npm audit (advisory scan)
+        continue-on-error: true
+        run: npm audit --audit-level=high

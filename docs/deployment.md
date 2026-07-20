@@ -27,16 +27,21 @@ See [High availability](./high-availability.md) for the architecture these enabl
 | Env var | Default | Purpose |
 |---|---|---|
 | `NODE_ID` | unset | This node's identity, used as its Service Bus subscription name and Cosmos DB heartbeat document id. Falls back to `CONTAINER_APP_REPLICA_NAME` (set automatically by Container Apps), then a random id. |
-| `SERVICE_BUS_CONNECTION_STRING` | unset | Enables Service Bus-based cross-node replication. The Shared Access Policy needs **Manage** rights — each node creates/deletes its own subscription dynamically. |
+| `SERVICE_BUS_CONNECTION_STRING` | unset | Enables Service Bus-based cross-node replication via a SAS connection string. The policy needs **Manage** rights — each node creates/deletes its own subscription dynamically. Prefer managed identity (below) in production. |
+| `SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE` | unset | Service Bus namespace host (e.g. `my-ns.servicebus.windows.net`) for managed-identity (AAD) auth, used when no connection string is set. The identity needs a role allowing topic manage + send/receive. Also accepts `SERVICE_BUS_NAMESPACE`. |
 | `SERVICE_BUS_TOPIC_NAME` | `backendcache-replication` | Shared topic every node publishes to and subscribes from |
 | `COSMOS_CONNECTION_STRING` | unset | Cosmos DB key-based auth. Takes precedence over `COSMOS_ENDPOINT`. |
 | `COSMOS_ENDPOINT` | unset | Cosmos DB account endpoint, for managed-identity (AAD) auth when no connection string is set |
 | `COSMOS_DATABASE` | `backendcache` | Database name — must already exist |
-| `COSMOS_KEYS_CONTAINER` | `keys` | Container for key state, partitioned on `/key` — must already exist |
+| `COSMOS_KEYS_CONTAINER` | `keys` | Container for key state, partitioned on `/key` — must already exist. Enable **`DefaultTimeToLive`** on it (e.g. `-1`, "on but no default") so Cosmos evicts expired keys via the per-document `ttl` and the container doesn't grow unbounded — see [High availability](./high-availability.md#operational-notes) |
 | `COSMOS_NODES_CONTAINER` | `nodes` | Container for node heartbeat/topology snapshots, partitioned on `/nodeId` — must already exist |
 | `HEARTBEAT_INTERVAL_MS` | `10000` | How often each node writes its stats/topology snapshot to Cosmos DB |
 | `NODE_STALE_MS` | `30000` | A peer node's heartbeat older than this is dropped from cluster admin views |
+| `ANTI_ENTROPY_INTERVAL_MS` | `300000` (5 min) | How often each node re-loads durable keys changed since its last pass, as a convergence backstop for replication events missed during a partition/blip. `0` disables — see [High availability](./high-availability.md#operational-notes) |
 | `CLUSTER_STARTUP_TIMEOUT_MS` | `30000` | Maximum time connecting to Cosmos DB/Service Bus and hydrating may take before the process exits and lets Container Apps' restart policy retry — a stuck startup fails fast rather than leaving a replica alive but permanently not-ready |
+| `REQUIRE_HA` | `false` | When `true`, refuse to start unless HA is fully configured (both Cosmos DB and Service Bus). Set in the multi-replica deployment so a partial or missing config crash-loops instead of silently running split-brain standalone nodes behind one load balancer. Leave unset for local/standalone use — see [High availability](./high-availability.md#standalone-mode) |
+| `SHUTDOWN_HARD_LIMIT_MS` | `10000` | Hard ceiling on graceful shutdown. `cluster.stop()`'s network calls (replication drain, Service Bus subscription delete) hanging — especially on the crash path — would otherwise leave a zombie that never exits; this force-exits instead |
+| `MAX_FAILED_AUTH_ATTEMPTS` | `5` | Consecutive failed `AUTH` attempts on one connection before it's dropped, forcing a full reconnect per burst of guesses to blunt line-speed password brute force. `0` disables |
 
 A consuming application points its `REDIS_URL` at BackendCache exactly as
 it would at real Redis — e.g. `redis://:<password>@backendcache:6379` —

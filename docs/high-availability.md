@@ -53,6 +53,32 @@ which:
 2. Broadcasts the same fact over the node's Service Bus subscription, so
    every other node applies it to its own in-memory copy.
 
+The exact *shape* of what's replicated depends on the command:
+
+- `SET` / `DEL` ship the whole key's post-state (an absolute upsert, or a
+  delete).
+- `INCR` ships this node's *cumulative contribution* to the counter, not a
+  whole-key value — a commutative G-counter update (see the `INCR` bullet
+  in the consistency model below).
+- `HSET` / `HDEL` / `ZADD` / `ZREMRANGEBYSCORE` ship only the specific
+  fields/members they touched (see the consistency model below).
+- `EXPIRE` / `PEXPIRE` ship **only the key's new TTL**, not a whole-entry
+  snapshot. Folding a TTL change into a whole-entry upsert would overwrite
+  peers with this node's entire entry — clobbering any field/member a peer
+  holds that this node hasn't received yet. Replicating the expiry on its
+  own preserves the field-granularity guarantee (see the TTL bullet in the
+  consistency model).
+
+**Write coalescing.** Same-key whole-key writes (`SET`/`INCR`/`DEL`) that
+queue up faster than they drain are collapsed to the latest one before the
+network round trip: a burst of N `INCR`s on one hot counter costs one
+in-flight Cosmos write plus one coalesced write, not N — each absolute
+upsert fully supersedes the previous, so shipping the intermediates would
+be wasted Cosmos RUs and Service Bus operations. Field/member deltas and
+TTL changes are never coalesced away (each carries a distinct change a
+later one doesn't contain), and coalescing never reorders across different
+kinds, so a `SET` → `EXPIRE` → `HSET` sequence on one key stays ordered.
+
 This is **fire-and-forget relative to the client's reply** — the RESP
 response the client already received reflects the fast local mutation,
 not a round trip to Cosmos DB or Service Bus. Convergence across nodes
@@ -87,16 +113,23 @@ from cluster views.
 This is an **eventually-consistent, multi-master** design, not a
 distributed-consensus one. Concretely:
 
-- **Cross-node writes race.** If two clients hit `INCR` on the same
-  rate-limit key on two different nodes within the same replication
-  window, both nodes compute their "next" value from their own local
-  copy, and Cosmos DB / Service Bus resolve it as a last-write-wins fact
-  rather than a distributed compare-and-swap. This mirrors the same
-  fixed-window imprecision the [rate-limit store deviation](./rate-limit-store.md)
-  already documents for a single node (`INCR` + `EXPIRE NX` is a
-  fixed-window counter, not an atomic script) — running multiple nodes
-  widens the same race window from "within one process" to "within one
-  replication round trip," not a new class of problem.
+- **`INCR` converges on the true sum across nodes (G-counter), not
+  last-write-wins.** Each node tracks its *own* cumulative contribution to
+  a counter, and replicates that running total; peers fold it in by max, so
+  the effective value is the sum of every node's contribution. Two clients
+  hitting `INCR` on the same rate-limit key on different nodes within the
+  same replication window therefore *both* count — the counter doesn't
+  undercount under contention (which is exactly when rate limiting matters:
+  a fail-open during a spike is the failure this avoids). Because each event
+  carries a cumulative total merged by max, the convergence is commutative
+  and idempotent: reordered, duplicated, or delayed delivery can't make the
+  counter drift. (Other cross-node writes to the *same* value — a `SET`, or
+  two `HSET`s to the same field — still resolve last-write-wins; it's
+  specifically the additive `INCR` that's now conflict-free.)
+- **`SET` on a counter resets it (last-write-wins).** Writing a plain value
+  to a key clears its per-origin contributions cluster-wide; a `SET` racing
+  concurrent `INCR`s on the same key resolves last-write-wins, as any
+  overwrite does.
 - **Reads are always local.** `GET` / `HGETALL` / `ZCOUNT` never call out
   to Cosmos DB — that's the whole point of the in-memory hot copy. A key
   written on another node is visible locally once its replication event
@@ -123,20 +156,33 @@ distributed-consensus one. Concretely:
   — this doesn't create a new failure mode, it just narrows the existing
   one from "the whole key" down to "the one field/member actually
   contended."
+- **`EXPIRE`/`PEXPIRE` replicate as a TTL-only fact.** A TTL change ships
+  just the key's new expiry (`applyReplicatedTtl` on peers, a Cosmos Patch
+  on `/entry/expiresAtMs`), leaving the key's value/fields/members
+  untouched. This is what keeps an `EXPIRE` on a hash/sorted set from
+  reverting a peer's concurrent field/member write: the common `INCR` +
+  `EXPIRE` rate-limit idiom no longer risks the expiry step clobbering the
+  counter's other cross-node writes. A TTL event for a key a peer doesn't
+  hold is a no-op there (`EXPIRE` can't create a key), matching local
+  semantics.
 - **A no-op never replicates.** `EXPIRE`/`PEXPIRE`/`HDEL`/
   `ZREMRANGEBYSCORE`/`DEL` against a key this node doesn't currently hold
   locally ship nothing at all — the dispatcher checks whether the key
-  existed before *and* after the command, and only replicates when
-  something actually changed here. Without this, a command that's a
+  existed before *and* after the command (and, for `EXPIRE`/`PEXPIRE`,
+  whether the reply was `:1`), and only replicates when something actually
+  changed here. Without this, a command that's a
   genuine no-op on this node (because the key was created on another node
   moments ago and hasn't replicated in yet) would otherwise broadcast a
   phantom "this key is deleted," destroying a real value elsewhere in the
   cluster.
-- **Same-node writes to the same key replicate in order.** Two rapid
-  `SET`s on the same key from the same client are chained (not run
+- **Same-node writes to the same key replicate in order.** Rapid writes on
+  the same key from the same node are drained one at a time (not run
   concurrently) through the replication pipeline, so the cluster always
   converges on whichever write happened last locally — not whichever
-  network round trip happened to finish first. This doesn't extend across
+  network round trip happened to finish first. Consecutive whole-key writes
+  that haven't started yet coalesce to the latest (see "Write coalescing"
+  above), which preserves this ordering while collapsing redundant
+  intermediate writes. This doesn't extend across
   nodes: two *different* nodes writing the same key concurrently still
   race, per the `INCR` bullet above.
 - **A newly-joining node's snapshot never overwrites a write that landed
@@ -177,6 +223,20 @@ since running with real persistence but no cross-node sync (or vice
 versa) would silently violate the HA guarantee rather than loudly failing
 closed to the well-understood single-node behavior.
 
+**`REQUIRE_HA=true` turns that fallback into a hard startup failure.** A
+multi-replica deployment (the Bicep pins `minReplicas: 2`) must *never*
+silently run standalone: a typo'd env var or a missed secret would
+otherwise leave two or more independent, non-replicating nodes behind one
+connection-spraying load balancer — divergent per-connection keyspaces,
+the exact correctness failure the old single-replica invariant existed to
+prevent, visible only as a warn-level log. With `REQUIRE_HA` set, a
+partial or missing HA config crashes the process at startup instead, so
+Container Apps' restart policy surfaces the misconfiguration loudly rather
+than serving split-brain traffic. It is set in
+[`infra/backendcache.bicep`](../infra/backendcache.bicep); leave it unset
+for local development and the test suite, where standalone is the intended
+mode.
+
 ## Operational notes
 
 - **Startup fails fast, it doesn't hang**: connecting to Cosmos DB/Service
@@ -189,13 +249,34 @@ closed to the well-understood single-node behavior.
   is also why a partially-configured environment (Cosmos DB set, Service
   Bus not, or vice versa) falls back to standalone instead of half-running
   HA — see [Standalone mode](#standalone-mode) above.
-- **Service Bus permissions**: each node creates its own subscription on
-  the shared replication topic at startup (named after its node id) and
-  deletes it on graceful shutdown; a node that dies without deregistering
-  leaves an orphaned subscription that self-deletes after
-  `autoDeleteOnIdle` (1 hour). This requires the connection string's
-  Shared Access Policy to have **Manage** rights, not just Send/Listen —
-  see [`infra/backendcache.bicep`](../infra/backendcache.bicep).
+- **Replication death is detected, not silent**: the receiver treats a
+  vanished subscription (`MessagingEntityNotFound`) or a sustained run of
+  receive errors as fatal and exits the process (non-zero), so the
+  orchestrator restarts a clean instance that re-creates its subscription
+  and re-hydrates. Because the receiver uses `receiveAndDelete`, anything
+  missed while it was broken is gone — "keep logging and hope" would mean
+  diverging forever, which is the failure this replaces.
+- **Anti-entropy backstop**: every `ANTI_ENTROPY_INTERVAL_MS` (default
+  5 min, matching the Service Bus message TTL) each node re-loads the
+  durable keys written since its last pass (`WHERE updatedAtMs > @since`)
+  and applies them locally. This is a cheap convergence safety net for
+  anything a node missed during a brief partition or receiver blip —
+  applying Cosmos's snapshot is safe under last-write-wins (Cosmos is the
+  source of truth, and its field/member-patched documents already reflect
+  the merged state), so a missed write converges on the next pass instead
+  of lingering until the key is next written. `0` disables it.
+- **Service Bus auth & permissions**: the app prefers **managed identity**
+  (`SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE` + `DefaultAzureCredential`),
+  falling back to a connection string only when that's all that's set —
+  mirroring the Cosmos layer, so production ships no Service Bus secret.
+  Each node creates its own subscription on the shared replication topic at
+  startup (named after its node id) and deletes it on graceful shutdown; a
+  node that dies without deregistering leaves an orphaned subscription that
+  self-deletes after `autoDeleteOnIdle` (1 hour). Because nodes manage
+  their own subscriptions, the identity (or SAS policy) needs **manage**
+  rights on the topic, not just Send/Listen — scope it to the one
+  namespace/topic. Note the topic is part of the data-plane trust boundary:
+  see [Security](./security.md).
 - **Cosmos DB documents are never Lua/stored-procedure driven** — every
   operation is a plain upsert, delete, query, or Patch-API call via the
   SDK, keeping the "no embedded scripting engine" property from
@@ -208,6 +289,28 @@ closed to the well-understood single-node behavior.
   Field/member names are escaped as JSON Pointer segments (`~` and `/`)
   since Redis key/field names can contain either, and patch operations are
   batched at 10 per request (Cosmos's own per-call limit).
+- **Expired keys are self-limiting in Cosmos DB**: local lazy/sweep expiry
+  removes keys from each node's in-memory copy independently and is *not*
+  replicated (every node expires the same key on its own clock), so nothing
+  deletes the corresponding Cosmos document on expiry. To keep the keys
+  container from growing monotonically with every short-lived counter or
+  window, each document carries a native Cosmos `ttl` property derived from
+  its `expiresAtMs` (`-1` = no expiry), so Cosmos evicts dead documents
+  itself. Enable this by setting **`DefaultTimeToLive` on the keys
+  container** (any non-null value, e.g. `-1` for "on, but no default
+  expiry") — without it the per-document `ttl` is ignored. Hydration is
+  belt-and-suspenders on top: `loadAll()` excludes already-expired
+  documents in its query (`WHERE ... expiresAtMs > @now`, since Cosmos's
+  own TTL sweep is lazy and can lag), and the coordinator re-checks each
+  returned snapshot's expiry before applying it.
+- **Hydration is bounded by `MAX_MEMORY_BYTES`**: a Cosmos keyspace that
+  has grown larger than a node can hold would otherwise OOM the node
+  mid-hydration and turn every restart into a crash loop (replicated/
+  hydrated applies deliberately bypass the write-admission ceiling). So
+  hydration stops loading once the loaded estimate crosses the ceiling,
+  logs `cluster.hydration_truncated`, and the node comes ready serving the
+  partial set — a signal to add memory or shard the keyspace, not a silent
+  time bomb.
 - **Key names as document ids**: Redis key names routinely contain
   characters Cosmos DB document ids forbid (`/`, `#`, `?`); the `id` field
   is a base64url encoding of the key, with the original key kept verbatim

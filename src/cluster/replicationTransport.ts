@@ -11,8 +11,16 @@ import type { ReplicationEvent } from './types.js';
 export interface ReplicationTransport {
   readonly kind: 'null' | 'servicebus';
 
-  /** Starts delivering incoming events to `onMessage`. Must be called once before publish(). */
-  start(onMessage: (event: ReplicationEvent) => void): Promise<void>;
+  /**
+   * Starts delivering incoming events to `onMessage`. Must be called once
+   * before publish(). `onFatal` is invoked if the transport detects an
+   * unrecoverable receive condition — its subscription vanished, or receive
+   * errors are sustained — after which this node can no longer be trusted
+   * to see peers' writes and should exit so a restart re-creates the
+   * subscription and re-hydrates (see docs/high-availability.md). Silent,
+   * permanent divergence is the failure this prevents.
+   */
+  start(onMessage: (event: ReplicationEvent) => void, onFatal?: (err: Error) => void): Promise<void>;
 
   /** Broadcasts an event to every other node. */
   publish(event: ReplicationEvent): Promise<void>;

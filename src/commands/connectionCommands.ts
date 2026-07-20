@@ -24,8 +24,9 @@ export function hello(ctx: CommandContext, args: string[]): CommandResult {
     const sub = args[i].toUpperCase();
     if (sub === 'AUTH' && i + 2 < args.length) {
       const password = args[i + 2];
-      if (!checkAuth(ctx, password)) return result(invalidPasswordError());
+      if (!checkAuth(ctx, password)) return failedAuth(ctx);
       ctx.conn.authenticated = true;
+      ctx.conn.failedAuthCount = 0;
       i += 2;
     } else if (sub === 'SETNAME' && i + 1 < args.length) {
       ctx.conn.clientName = args[i + 1];
@@ -48,14 +49,32 @@ export function hello(ctx: CommandContext, args: string[]): CommandResult {
 export function auth(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length < 1 || args.length > 2) return result(wrongArgsError('auth'));
   const password = args.length === 2 ? args[1] : args[0];
-  if (!checkAuth(ctx, password)) return result(invalidPasswordError());
+  if (!checkAuth(ctx, password)) return failedAuth(ctx);
   ctx.conn.authenticated = true;
+  ctx.conn.failedAuthCount = 0;
   return result(OK);
 }
 
 function checkAuth(ctx: CommandContext, password: string): boolean {
   if (!ctx.config.authPassword) return true;
   return secureEqual(password, ctx.config.authPassword);
+}
+
+/**
+ * Records a failed AUTH and, once a connection crosses
+ * maxFailedAuthAttempts consecutive failures, closes it after the error
+ * reply. That turns "unlimited back-to-back guesses on one socket" into "N
+ * guesses per TCP connection," forcing a full reconnect + handshake per
+ * burst — a large constant-factor slowdown for a line-speed brute force,
+ * and one that makes the connection cap and any upstream connection-rate
+ * limit actually bite. The reply is unchanged (a generic invalid-password
+ * error) so it leaks nothing about how close a guess was.
+ */
+function failedAuth(ctx: CommandContext): CommandResult {
+  ctx.conn.failedAuthCount++;
+  const limit = ctx.config.maxFailedAuthAttempts;
+  const closeAfter = limit > 0 && ctx.conn.failedAuthCount >= limit;
+  return { frames: [invalidPasswordError()], closeAfter };
 }
 
 export function client(ctx: CommandContext, args: string[]): CommandResult {

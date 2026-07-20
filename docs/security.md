@@ -5,7 +5,12 @@
   environment — see [Deployment](./deployment.md)).
 - **`AUTH`** via `REDIS_AUTH_PASSWORD`, sent automatically by the `redis`
   client whenever `REDIS_URL` includes credentials — defense-in-depth even
-  on a private network.
+  on a private network. The password compare is timing-safe, and a
+  connection that fails `AUTH` `MAX_FAILED_AUTH_ATTEMPTS` times in a row
+  (default 5) is dropped, so a brute-force attempt pays a full TCP
+  reconnect + handshake per burst instead of firing unlimited guesses down
+  one socket at line speed. The failure reply is generic (it never hints
+  how close a guess was).
 - **The admin API token is a separate secret** from the `AUTH` password,
   independently rotatable — different blast radius. The `AUTH` password
   lets a caller read/write cache data as the app would; the admin token
@@ -14,13 +19,27 @@
   through the admin API propagates cluster-wide, so the admin token's
   blast radius is the whole cluster, not just the node answering the
   request.
-- **The Service Bus and Cosmos DB connection strings are separate secrets
-  again**, pulled from Key Vault the same way as `REDIS_AUTH_PASSWORD`/
-  `ADMIN_TOKEN` (see [`infra/backendcache.bicep`](../infra/backendcache.bicep)).
-  The Service Bus policy needs Manage rights (to create/delete its own
-  subscription per node), which is a wider grant than Send/Listen alone —
-  scope it to a dedicated policy on the replication topic, not a
-  namespace-root policy shared with unrelated queues/topics.
+- **The Azure data dependencies authenticate with managed identity, not
+  connection strings.** The Bicep wires `COSMOS_ENDPOINT` +
+  `SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE` and the app uses
+  `DefaultAzureCredential` (the code supports a connection string / account
+  key as a fallback for local dev, but production ships neither). That
+  keeps the only Key Vault secrets the two *application*-level ones
+  (`REDIS_AUTH_PASSWORD`, `ADMIN_TOKEN`) — nothing granting broad account
+  access. Grant the identity least-privilege data-plane roles: the Cosmos
+  DB data-contributor role on the one account, and a Service Bus role that
+  allows topic manage + send/receive (each node creates/deletes its own
+  subscription at startup) scoped to the one namespace/topic, not a
+  namespace-root grant shared with unrelated queues/topics.
+- **The replication topic is inside the data-plane trust boundary.** Any
+  principal that can *send* to the Service Bus topic can inject
+  `upsert`/`delete`/`ttl`/`increment`/`publish` events into every node's
+  in-memory copy — replicated applies are validated for field presence but
+  deliberately bypass admission control (a peer already accepted the
+  write). This is acceptable *because* the topic is reachable only by the
+  cluster's own managed identity on an internal network; treat Send rights
+  on the topic as equivalent to write access to the whole keyspace and
+  scope them accordingly.
 - **No `EVAL`/scripting support** means no arbitrary code execution
   surface — a structurally smaller attack surface than a general-purpose
   Redis-compatible engine, and a genuine security property of the

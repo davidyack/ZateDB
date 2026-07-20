@@ -38,6 +38,7 @@ export class Connection implements ConnectionContext {
   authenticated = false;
   mode: ConnectionMode = 'handshake';
   clientName: string | null = null;
+  failedAuthCount = 0;
   readonly remoteAddress: string;
 
   private parser: RespRequestParser;
