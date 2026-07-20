@@ -2,6 +2,11 @@ import { createServer, type Server } from 'node:http';
 import type { RespServer } from '../server/respServer.js';
 import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 import type { ServerConfig } from '../config.js';
+import type { Store } from '../store/store.js';
+import type { PubSubRegistry } from '../pubsub/registry.js';
+import { getActiveConnectionCount, getCommandsProcessedTotal } from '../telemetry/commandTelemetry.js';
+import { PROMETHEUS_CONTENT_TYPE, renderPrometheus } from '../telemetry/prometheus.js';
+import { SERVER_VERSION } from '../version.js';
 import { logger } from '../logger.js';
 
 const startedAtMs = Date.now();
@@ -14,6 +19,8 @@ export class HealthServer {
     private readonly respServer: RespServer,
     private readonly config: ServerConfig,
     private readonly cluster: ClusterCoordinator,
+    private readonly store: Store,
+    private readonly pubsub: PubSubRegistry,
   ) {
     this.server = createServer((req, res) => {
       if (req.url === '/healthz' && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -44,6 +51,29 @@ export class HealthServer {
         const ready = this.ready && this.cluster.isHydrated;
         const body = JSON.stringify({ ready, haEnabled: this.cluster.haEnabled, nodeId: this.cluster.nodeId });
         res.writeHead(ready ? 200 : 503, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+        res.end(req.method === 'GET' ? body : undefined);
+        return;
+      }
+      if (req.url === '/metrics' && (req.method === 'GET' || req.method === 'HEAD')) {
+        // Prometheus pull endpoint, deliberately unauthenticated (like the
+        // health probes) and cheap: every number here is an already-tracked
+        // O(1) aggregate — no keyspace walk — and no key names or values are
+        // ever exposed, only counts.
+        const keyCounts = this.store.keyCounts();
+        const pubsubStats = this.pubsub.stats();
+        const body = renderPrometheus({
+          uptimeSeconds: Math.floor((Date.now() - startedAtMs) / 1000),
+          connectedClients: getActiveConnectionCount(),
+          commandsProcessed: getCommandsProcessedTotal(),
+          keyCounts,
+          memoryBytes: this.store.memoryBytesEstimate(),
+          pubsub: pubsubStats,
+          haEnabled: this.cluster.haEnabled,
+          hydrated: this.cluster.isHydrated,
+          version: SERVER_VERSION,
+          nodeId: this.cluster.nodeId,
+        });
+        res.writeHead(200, { 'content-type': PROMETHEUS_CONTENT_TYPE, 'content-length': Buffer.byteLength(body) });
         res.end(req.method === 'GET' ? body : undefined);
         return;
       }

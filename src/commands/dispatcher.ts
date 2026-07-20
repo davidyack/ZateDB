@@ -6,6 +6,7 @@ import * as hashCommands from './hashCommands.js';
 import * as sortedSetCommands from './sortedSetCommands.js';
 import * as pubsubCommands from './pubsubCommands.js';
 import * as scriptingCommands from './scriptingCommands.js';
+import * as serverCommands from './serverCommands.js';
 
 export interface CommandSpec {
   handler: CommandHandler;
@@ -73,6 +74,7 @@ const msetKeys = (args: string[]): string[] => args.filter((_, i) => i % 2 === 0
 
 export const COMMANDS: Record<string, CommandSpec> = {
   PING: spec(connectionCommands.ping, { allowedPreAuth: true, allowedInSubscriberMode: true }),
+  INFO: spec(serverCommands.info),
   HELLO: spec(connectionCommands.hello, { allowedPreAuth: true }),
   AUTH: spec(connectionCommands.auth, { allowedPreAuth: true }),
   CLIENT: spec(connectionCommands.client, { allowedPreAuth: true }),

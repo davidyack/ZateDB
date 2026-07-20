@@ -4,6 +4,7 @@ import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
 import { invalidPasswordError, wrongArgsError } from './errors.js';
 import { secureEqual } from '../util/secureCompare.js';
+import { SERVER_NAME, SERVER_VERSION } from '../version.js';
 
 export function ping(ctx: CommandContext, args: string[]): CommandResult {
   if (args.length > 1) return result(wrongArgsError('ping'));
@@ -35,8 +36,8 @@ export function hello(ctx: CommandContext, args: string[]): CommandResult {
   }
 
   const fields: Array<[string, RespValue]> = [
-    ['server', bulk('backendcache')],
-    ['version', bulk('1.0.0')],
+    ['server', bulk(SERVER_NAME)],
+    ['version', bulk(SERVER_VERSION)],
     ['proto', integer(2)],
     ['id', integer(hashConnId(ctx.conn.id))],
     ['mode', bulk('standalone')],

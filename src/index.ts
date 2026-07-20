@@ -77,7 +77,7 @@ async function main(): Promise<void> {
   const respServer = new RespServer(store, pubsub, config, cluster);
   connectionCount = () => respServer.activeConnectionCount();
 
-  const healthServer = new HealthServer(respServer, config, cluster);
+  const healthServer = new HealthServer(respServer, config, cluster, store, pubsub);
   const adminServer = new AdminServer(store, pubsub, respServer, config, cluster);
 
   // Health/admin listen immediately so /readyz is reachable (reporting
