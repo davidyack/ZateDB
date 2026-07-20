@@ -208,13 +208,39 @@ describe('dispatcher cluster replication correctness', () => {
       await originalPutKey(key, entry);
     };
 
-    for (let i = 0; i < 5; i++) dispatch(ctx, ['INCR', 'hot-counter']);
+    for (let i = 0; i < 5; i++) dispatch(ctx, ['SET', 'hot', `v${i}`]);
     await new Promise((resolve) => setTimeout(resolve, 20)); // let the burst queue up behind the gated first write
     releaseFirst();
     await cluster.drain(1000);
 
     expect(putCalls).toBe(2); // first (gated) + one coalesced latest, not 5
-    expect(durable.keys.get('hot-counter')).toEqual({ type: 'string', value: '5', expiresAtMs: null });
+    expect(durable.keys.get('hot')).toEqual({ type: 'string', value: 'v4', expiresAtMs: null });
+  });
+
+  it('coalesces a burst of INCRs into far fewer durable contribution writes', async () => {
+    // The hot-counter path: N rapid INCRs from one node ship one in-flight
+    // cumulative-total write plus one coalesced latest, not N — and the
+    // final durable contribution is the running total.
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const originalPutIncrement = durable.putIncrement.bind(durable);
+    let incrCalls = 0;
+    durable.putIncrement = async (key, origin, total) => {
+      incrCalls++;
+      if (incrCalls === 1) await firstGate;
+      await originalPutIncrement(key, origin, total);
+    };
+
+    for (let i = 0; i < 5; i++) dispatch(ctx, ['INCR', 'rl']);
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let the burst queue behind the gated first write
+    releaseFirst();
+    await cluster.drain(1000);
+
+    expect(incrCalls).toBe(2); // first (gated) + one coalesced latest, not 5
+    expect(ctx.store.get('rl')).toBe('5');
+    expect((durable.keys.get('rl') as { contributions?: Record<string, number> }).contributions).toEqual({ 'node-a': 5 });
   });
 
   it('replicates sequential writes to the same key in call order, even if their network round trips would otherwise finish out of order', async () => {

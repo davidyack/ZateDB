@@ -39,11 +39,20 @@ interface CommandSpec {
    * whole-key `mutatedKeys` path.
    */
   ttlReplication?: boolean;
+  /**
+   * INCR replicates as a commutative per-origin G-counter contribution, not
+   * a whole-key last-write-wins upsert — otherwise concurrent cross-node
+   * increments undercount under contention (the flagship rate-limit
+   * failure). Routes to ClusterCoordinator.publishIncrement.
+   */
+  incrementReplication?: boolean;
 }
 
 function spec(
   handler: CommandHandler,
-  opts: Partial<Pick<CommandSpec, 'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys' | 'fieldReplication' | 'ttlReplication'>> = {},
+  opts: Partial<
+    Pick<CommandSpec, 'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys' | 'fieldReplication' | 'ttlReplication' | 'incrementReplication'>
+  > = {},
 ): CommandSpec {
   return {
     handler,
@@ -52,6 +61,7 @@ function spec(
     mutatedKeys: opts.mutatedKeys,
     fieldReplication: opts.fieldReplication,
     ttlReplication: opts.ttlReplication,
+    incrementReplication: opts.incrementReplication,
   };
 }
 
@@ -68,7 +78,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   GET: spec(stringCommands.get),
   SET: spec(stringCommands.set, { mutatedKeys: singleKey }),
   DEL: spec(stringCommands.del, { mutatedKeys: allArgsAsKeys }),
-  INCR: spec(stringCommands.incr, { mutatedKeys: singleKey }),
+  INCR: spec(stringCommands.incr, { incrementReplication: true }),
   EXPIRE: spec(stringCommands.expire, { ttlReplication: true }),
   PEXPIRE: spec(stringCommands.pexpire, { ttlReplication: true }),
 
@@ -240,6 +250,10 @@ export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcom
       ctx.cluster.publishMessage(args[0], args[1]);
     } else if (replicatingFields && fieldPrep) {
       replicateFieldLevelMutation(ctx, command, args, fieldPrep);
+    } else if (ctx.cluster.haEnabled && cmdSpec.incrementReplication) {
+      // INCR always mutates (creates or increments), so there's no no-op to
+      // filter — replicate this node's new cumulative contribution.
+      ctx.cluster.publishIncrement(args[0]);
     } else if (ctx.cluster.haEnabled && cmdSpec.ttlReplication) {
       // Replicate only when the TTL actually changed. EXPIRE/PEXPIRE reply
       // :1 when they applied and :0 when they didn't (key absent, or an

@@ -254,3 +254,49 @@ describe('Store.applyReplicatedTtl', () => {
     expect(store.getKeyDetail('k')?.info.ttlMsRemaining).toBeNull();
   });
 });
+
+describe('Store INCR as a G-counter', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('sums per-origin contributions (concurrent nodes both count)', () => {
+    expect(store.incr('c', 'node-a')).toBe(1);
+    store.applyReplicatedIncrement('c', 'node-b', 3); // peer contributed 3
+    expect(store.get('c')).toBe('4');
+    expect(store.incr('c', 'node-a')).toBe(5); // node-a now at 2, plus node-b's 3
+    expect(store.contributionFor('c', 'node-a')).toBe(2);
+  });
+
+  it('applyReplicatedIncrement merges by max, so a re-delivered event is idempotent', () => {
+    store.applyReplicatedIncrement('c', 'node-b', 5);
+    store.applyReplicatedIncrement('c', 'node-b', 5); // duplicate
+    store.applyReplicatedIncrement('c', 'node-b', 3); // stale/reordered, lower total
+    expect(store.get('c')).toBe('5'); // never 10, never regressed to 3
+  });
+
+  it('seeds a SET base under the shared origin so it is counted once, not per node', () => {
+    store.set('c', '10');
+    expect(store.incr('c', 'node-a')).toBe(11); // base 10 + node-a's 1
+    // A peer that also increments the same SET-seeded key doesn't re-add the base.
+    store.applyReplicatedIncrement('c', 'node-b', 1);
+    expect(store.get('c')).toBe('12'); // 10 (seed) + 1 (a) + 1 (b)
+  });
+
+  it('SET clears counter state (last-write-wins reset)', () => {
+    store.incr('c', 'node-a');
+    store.incr('c', 'node-a');
+    expect(store.get('c')).toBe('2');
+    store.set('c', '0');
+    expect(store.get('c')).toBe('0');
+    expect(store.contributionFor('c', 'node-a')).toBe(0); // contributions gone
+    expect(store.incr('c', 'node-a')).toBe(1); // counts fresh from the reset base
+  });
+
+  it('still rejects INCR on a non-integer string', () => {
+    store.set('c', 'not-a-number');
+    expect(() => store.incr('c', 'node-a')).toThrow();
+  });
+});

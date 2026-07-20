@@ -280,13 +280,28 @@ describe('ClusterCoordinator HA mode: cross-node convergence', () => {
     storeB.close();
   });
 
-  it('replicates a mutation applied on one node to the other node\'s in-memory copy', async () => {
-    storeA.incr('counter'); // simulates a command handler's local mutation, already applied
-    clusterA.publishKeyChange('counter'); // what the dispatcher does right after
+  it('replicates a SET mutation applied on one node to the other node\'s in-memory copy', async () => {
+    storeA.set('k', 'v'); // simulates a command handler's local mutation, already applied
+    clusterA.publishKeyChange('k'); // what the dispatcher does right after
+
+    await waitFor(() => storeB.get('k') === 'v');
+    expect(storeB.get('k')).toBe('v');
+    expect(durable.keys.get('k')).toEqual({ type: 'string', value: 'v', expiresAtMs: null });
+  });
+
+  it('replicates an INCR as a per-origin G-counter contribution', async () => {
+    storeA.incr('counter', 'node-a'); // local INCR attributed to this node
+    clusterA.publishIncrement('counter'); // what the dispatcher does right after
 
     await waitFor(() => storeB.get('counter') === '1');
     expect(storeB.get('counter')).toBe('1');
-    expect(durable.keys.get('counter')).toEqual({ type: 'string', value: '1', expiresAtMs: null });
+    // The durable snapshot records the contribution per origin, not an absolute value.
+    expect(durable.keys.get('counter')).toEqual({
+      type: 'string',
+      value: '1',
+      expiresAtMs: null,
+      contributions: { 'node-a': 1 },
+    });
   });
 
   it('replicates an EXPIRE as a TTL-only change to the other node', async () => {
@@ -302,6 +317,34 @@ describe('ClusterCoordinator HA mode: cross-node convergence', () => {
     expect(storeB.get('k')).toBe('v'); // value untouched, only the TTL was replicated
     // The durable snapshot keeps its value and gains the expiry.
     expect(durable.keys.get('k')).toEqual({ type: 'string', value: 'v', expiresAtMs: at });
+  });
+
+  it('concurrent cross-node INCRs converge on the SUM, not last-write-wins (G-counter)', async () => {
+    // The flagship fix: with absolute last-write-wins replication, A doing 2
+    // and B doing 3 on the same counter would converge on whichever wrote
+    // last (2 or 3) — undercounting exactly when rate limiting matters most.
+    // Per-origin contributions sum to the true 5 on both nodes.
+    storeA.incr('rl', 'node-a');
+    clusterA.publishIncrement('rl');
+    storeA.incr('rl', 'node-a');
+    clusterA.publishIncrement('rl');
+
+    storeB.incr('rl', 'node-b');
+    clusterB.publishIncrement('rl');
+    storeB.incr('rl', 'node-b');
+    clusterB.publishIncrement('rl');
+    storeB.incr('rl', 'node-b');
+    clusterB.publishIncrement('rl');
+
+    await waitFor(() => storeA.get('rl') === '5' && storeB.get('rl') === '5');
+    expect(storeA.get('rl')).toBe('5');
+    expect(storeB.get('rl')).toBe('5');
+    expect(durable.keys.get('rl')).toEqual({
+      type: 'string',
+      value: '5',
+      expiresAtMs: null,
+      contributions: { 'node-a': 2, 'node-b': 3 },
+    });
   });
 
   it('replicates a delete', async () => {

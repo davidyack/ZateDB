@@ -2,6 +2,20 @@ export interface StringEntry {
   type: 'string';
   value: string;
   expiresAtMs: number | null;
+  /**
+   * Present only when the key is a distributed counter (touched by INCR in
+   * HA mode): a grow-only G-counter mapping each origin node id to its
+   * cumulative contribution. The effective integer value is the sum of all
+   * contributions, and `value` is kept in sync as that sum's string form so
+   * GET and every other read stay oblivious to this. Modelling INCR this way
+   * — rather than replicating an absolute last-write-wins value — is what
+   * makes concurrent cross-node increments converge on the true total
+   * (commutative, reorder/duplicate/drop-safe) instead of undercounting
+   * under contention. A reserved origin ('' — see SEED_ORIGIN) holds any
+   * pre-existing base value a SET left before the first INCR, so the base
+   * isn't attributed to (and double-counted across) real nodes.
+   */
+  contributions?: Map<string, number>;
 }
 
 export interface HashEntry {

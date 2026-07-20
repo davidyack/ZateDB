@@ -55,8 +55,11 @@ which:
 
 The exact *shape* of what's replicated depends on the command:
 
-- `SET` / `INCR` / `DEL` ship the whole key's post-state (an absolute
-  upsert, or a delete).
+- `SET` / `DEL` ship the whole key's post-state (an absolute upsert, or a
+  delete).
+- `INCR` ships this node's *cumulative contribution* to the counter, not a
+  whole-key value — a commutative G-counter update (see the `INCR` bullet
+  in the consistency model below).
 - `HSET` / `HDEL` / `ZADD` / `ZREMRANGEBYSCORE` ship only the specific
   fields/members they touched (see the consistency model below).
 - `EXPIRE` / `PEXPIRE` ship **only the key's new TTL**, not a whole-entry
@@ -110,16 +113,23 @@ from cluster views.
 This is an **eventually-consistent, multi-master** design, not a
 distributed-consensus one. Concretely:
 
-- **Cross-node writes race.** If two clients hit `INCR` on the same
-  rate-limit key on two different nodes within the same replication
-  window, both nodes compute their "next" value from their own local
-  copy, and Cosmos DB / Service Bus resolve it as a last-write-wins fact
-  rather than a distributed compare-and-swap. This mirrors the same
-  fixed-window imprecision the [rate-limit store deviation](./rate-limit-store.md)
-  already documents for a single node (`INCR` + `EXPIRE NX` is a
-  fixed-window counter, not an atomic script) — running multiple nodes
-  widens the same race window from "within one process" to "within one
-  replication round trip," not a new class of problem.
+- **`INCR` converges on the true sum across nodes (G-counter), not
+  last-write-wins.** Each node tracks its *own* cumulative contribution to
+  a counter, and replicates that running total; peers fold it in by max, so
+  the effective value is the sum of every node's contribution. Two clients
+  hitting `INCR` on the same rate-limit key on different nodes within the
+  same replication window therefore *both* count — the counter doesn't
+  undercount under contention (which is exactly when rate limiting matters:
+  a fail-open during a spike is the failure this avoids). Because each event
+  carries a cumulative total merged by max, the convergence is commutative
+  and idempotent: reordered, duplicated, or delayed delivery can't make the
+  counter drift. (Other cross-node writes to the *same* value — a `SET`, or
+  two `HSET`s to the same field — still resolve last-write-wins; it's
+  specifically the additive `INCR` that's now conflict-free.)
+- **`SET` on a counter resets it (last-write-wins).** Writing a plain value
+  to a key clears its per-origin contributions cluster-wide; a `SET` racing
+  concurrent `INCR`s on the same key resolves last-write-wins, as any
+  overwrite does.
 - **Reads are always local.** `GET` / `HGETALL` / `ZCOUNT` never call out
   to Cosmos DB — that's the whole point of the in-memory hot copy. A key
   written on another node is visible locally once its replication event

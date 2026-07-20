@@ -23,8 +23,17 @@ export interface DurableStore {
    */
   loadChangedSince(sinceMs: number): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>>;
 
-  /** Upserts the whole post-mutation state of a key (last-write-wins across nodes) — used for SET/INCR/EXPIRE/PEXPIRE. */
+  /** Upserts the whole post-mutation state of a key (last-write-wins across nodes) — used for SET/DEL. */
   putKey(key: string, entry: EntrySnapshot): Promise<void>;
+
+  /**
+   * Persists one origin's cumulative contribution to a counter key (INCR)
+   * without touching any other origin's — the durable counterpart of the
+   * in-memory G-counter, so two nodes incrementing the same counter
+   * concurrently both survive instead of last-write-wins clobbering. Set to
+   * the running total (idempotent), not added. Creates the counter if absent.
+   */
+  putIncrement(key: string, originId: string, originTotal: number): Promise<void>;
 
   /** Permanently removes a key. Idempotent — a missing key is not an error. */
   deleteKey(key: string): Promise<void>;
@@ -78,6 +87,8 @@ export class NullDurableStore implements DurableStore {
   }
 
   async putKey(): Promise<void> {}
+
+  async putIncrement(): Promise<void> {}
 
   async deleteKey(): Promise<void> {}
 

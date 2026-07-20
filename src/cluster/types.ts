@@ -14,11 +14,11 @@ import type { EntryTypeName } from '../store/types.js';
  * each other.
  */
 export type EntrySnapshot =
-  | { type: 'string'; value: string; expiresAtMs: number | null }
+  | { type: 'string'; value: string; expiresAtMs: number | null; contributions?: Record<string, number> }
   | { type: 'hash'; fields: Record<string, string>; expiresAtMs: number | null }
   | { type: 'sortedset'; members: Record<string, number>; expiresAtMs: number | null };
 
-export type ReplicationEventKind = 'upsert' | 'delete' | 'ttl' | 'publish' | 'hashField' | 'zsetMember';
+export type ReplicationEventKind = 'upsert' | 'delete' | 'ttl' | 'increment' | 'publish' | 'hashField' | 'zsetMember';
 
 /**
  * A single fact broadcast over the replication transport: "key X is now
@@ -43,6 +43,15 @@ export interface ReplicationEvent {
    * applied but this node hasn't received yet.
    */
   expiresAtMs?: number | null;
+  /**
+   * For 'increment' — the originating node's *cumulative* contribution to
+   * the counter (not a +1 delta). Shipping the running total, and merging
+   * it by max on each peer, is what makes INCR replication commutative and
+   * idempotent: a duplicated, reordered, or delayed event carries no less
+   * information than the one before it, so none of those delivery faults can
+   * make the counter drift. See Store.applyReplicatedIncrement.
+   */
+  contributionTotal?: number;
   channel?: string;
   message?: string;
   /** For 'hashField' — field/value pairs that were set (HSET). */

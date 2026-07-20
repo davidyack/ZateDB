@@ -93,6 +93,39 @@ describe('replication convergence under an adversarial transport', () => {
     expect(storeB.hgetall('h')).toEqual([['f', 'v']]); // exactly one field
   });
 
+  it('a duplicated INCR contribution does not double-count (idempotent G-counter)', async () => {
+    hub.setPolicy({ duplicate: true });
+    clusterA = build('node-a', storeA);
+    clusterB = build('node-b', storeB);
+    await Promise.all([clusterA.start(), clusterB.start()]);
+
+    storeA.incr('rl', 'node-a');
+    clusterA.publishIncrement('rl');
+    await clusterA.drain(1000);
+
+    // The increment event was delivered to B twice; merging by max (not
+    // adding) means B still shows 1, not 2.
+    expect(storeB.get('rl')).toBe('1');
+  });
+
+  it('INCR contributions delivered out of order still converge (reorder)', async () => {
+    hub.setPolicy({ hold: true });
+    clusterA = build('node-a', storeA);
+    clusterB = build('node-b', storeB);
+    await Promise.all([clusterA.start(), clusterB.start()]);
+
+    storeA.incr('rl', 'node-a'); // total 1
+    clusterA.publishIncrement('rl');
+    storeA.incr('rl', 'node-a'); // total 2
+    clusterA.publishIncrement('rl');
+    await clusterA.drain(1000);
+
+    hub.flushReversed(); // B sees the cumulative "2" before the "1"
+
+    // Max-merge means the older "1" can't undo the newer "2".
+    expect(storeB.get('rl')).toBe('2');
+  });
+
   it('a dropped event leaves a node stale until anti-entropy repairs it (drop + reconcile)', async () => {
     hub.setPolicy({ drop: (event, toNodeId) => toNodeId === 'node-b' && event.key === 'missed' });
     clusterA = build('node-a', storeA);

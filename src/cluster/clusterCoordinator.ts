@@ -17,7 +17,7 @@ import { errorMessage, logger } from '../logger.js';
  * never coalesce across each other, preserving order.
  */
 interface ReplicationTask {
-  coalesceClass: 'whole' | 'ttl' | 'field';
+  coalesceClass: 'whole' | 'ttl' | 'field' | 'incr';
   run: () => Promise<void>;
 }
 
@@ -264,6 +264,30 @@ export class ClusterCoordinator {
     ]);
   }
 
+  /**
+   * Call after a successful INCR. Replicates this node's *cumulative*
+   * contribution to the counter (not a +1 delta), which peers fold in by
+   * max — so concurrent cross-node increments converge on the true sum
+   * (commutative G-counter) instead of last-write-wins undercounting under
+   * contention, the failure this fixes for the flagship rate-limit use
+   * case. Coalesces ('incr' class): a later cumulative total supersedes an
+   * earlier queued one for the same key/origin, so a burst of INCRs costs
+   * one in-flight write plus one coalesced write, and dropping the
+   * intermediates loses nothing (the latest total already contains them).
+   */
+  publishIncrement(key: string): void {
+    if (!this.haEnabled) return;
+    const total = this.deps.store.contributionFor(key, this.nodeId);
+    this.enqueueForKey(key, 'incr', () => this.doPublishIncrement(key, total));
+  }
+
+  private async doPublishIncrement(key: string, total: number): Promise<void> {
+    await Promise.all([
+      this.deps.durable.putIncrement(key, this.nodeId, total),
+      this.deps.transport.publish(this.makeEvent({ kind: 'increment', key, contributionTotal: total })),
+    ]);
+  }
+
   private async doPublishKeyChange(key: string, entry: ReturnType<Store['getRawEntry']>): Promise<void> {
     // The Cosmos DB write and the Service Bus broadcast are independent —
     // peers apply the broadcast event directly, they don't read it back
@@ -391,6 +415,8 @@ export class ClusterCoordinator {
         this.deps.store.applyReplicatedDelete(event.key);
       } else if (event.kind === 'ttl' && event.key !== undefined && event.expiresAtMs !== undefined) {
         this.deps.store.applyReplicatedTtl(event.key, event.expiresAtMs);
+      } else if (event.kind === 'increment' && event.key !== undefined && event.contributionTotal !== undefined) {
+        this.deps.store.applyReplicatedIncrement(event.key, event.originNodeId, event.contributionTotal);
       } else if (event.kind === 'publish' && event.channel !== undefined && event.message !== undefined) {
         this.deps.pubsub.publish(event.channel, event.message);
       } else if (event.kind === 'hashField' && event.key !== undefined) {

@@ -33,6 +33,7 @@ interface CosmosPatchOperation {
   value?: unknown;
 }
 interface CosmosItemLike {
+  read<T = Record<string, unknown>>(): Promise<{ resource?: T }>;
   delete(): Promise<unknown>;
   patch(operations: CosmosPatchOperation[]): Promise<unknown>;
 }
@@ -72,6 +73,11 @@ function escapeJsonPointerSegment(segment: string): string {
 
 function isNotFound(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 404;
+}
+
+/** A 400 from Cosmos — e.g. patching a nested path whose parent object doesn't exist yet (a counter first created by a plain SET). */
+function isBadRequest(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 400;
 }
 
 /** Cosmos DB's documented limit on the number of operations in a single Patch request. */
@@ -189,6 +195,43 @@ export class CosmosDurableStore implements DurableStore {
       updatedAtMs: Date.now(),
       ttl: cosmosTtlSeconds(entry.expiresAtMs),
     });
+  }
+
+  async putIncrement(key: string, originId: string, originTotal: number): Promise<void> {
+    const id = toDocId(key);
+    const now = Date.now();
+    try {
+      // Per-origin field set — commutative and idempotent across nodes, so
+      // two nodes incrementing the same counter never clobber each other.
+      await this.keysContainer.item(id, key).patch([
+        { op: 'set', path: `/entry/contributions/${escapeJsonPointerSegment(originId)}`, value: originTotal },
+        { op: 'set', path: '/updatedAtMs', value: now },
+      ]);
+    } catch (err) {
+      if (!isNotFound(err) && !isBadRequest(err)) throw err;
+      // The document is missing (404) or has no /entry/contributions parent
+      // yet (a counter first created by a plain SET — a BadRequest). Seed it:
+      // read the current state, merge this origin's total in, and upsert.
+      // Same-origin increments are serialized upstream (per-key queue), so
+      // this read-modify-write only races other origins in this rare
+      // first-time window, resolving last-write-wins there.
+      const existing = isNotFound(err) ? undefined : (await this.keysContainer.item(id, key).read<{ entry?: { value?: string; contributions?: Record<string, number>; expiresAtMs?: number | null } }>()).resource;
+      const contributions: Record<string, number> = { ...(existing?.entry?.contributions ?? {}) };
+      const seed = existing?.entry?.value;
+      if (contributions[''] === undefined && seed !== undefined && /^-?\d+$/.test(seed) && Number(seed) !== 0) {
+        contributions[''] = Number(seed);
+      }
+      contributions[originId] = originTotal;
+      let total = 0;
+      for (const n of Object.values(contributions)) total += n;
+      await this.keysContainer.items.upsert({
+        id,
+        key,
+        entry: { type: 'string', value: String(total), contributions, expiresAtMs: existing?.entry?.expiresAtMs ?? null },
+        updatedAtMs: now,
+        ttl: cosmosTtlSeconds(existing?.entry?.expiresAtMs ?? null),
+      });
+    }
   }
 
   async putTtl(key: string, expiresAtMs: number | null): Promise<void> {

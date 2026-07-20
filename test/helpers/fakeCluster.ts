@@ -41,6 +41,20 @@ export class FakeDurableStore implements DurableStore {
     this.keys.set(key, entry);
     this.updatedAt.set(key, this.nextTs());
   }
+  async putIncrement(key: string, originId: string, originTotal: number): Promise<void> {
+    const existing = this.keys.get(key);
+    const base = existing?.type === 'string' ? existing.contributions ?? {} : {};
+    const contributions = { ...base, [originId]: originTotal };
+    let total = 0;
+    for (const n of Object.values(contributions)) total += n;
+    this.keys.set(key, {
+      type: 'string',
+      value: String(total),
+      expiresAtMs: existing?.type === 'string' ? existing.expiresAtMs : null,
+      contributions,
+    });
+    this.updatedAt.set(key, this.nextTs());
+  }
   async deleteKey(key: string): Promise<void> {
     this.keys.delete(key);
     this.updatedAt.delete(key);

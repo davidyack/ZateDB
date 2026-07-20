@@ -5,6 +5,24 @@ import { scoreInRange } from './scoreRange.js';
 
 export type ExpireFlag = 'NX' | 'XX' | 'GT' | 'LT';
 
+/**
+ * Reserved contribution origin for a counter's pre-existing base value (the
+ * integer a SET left before the key was ever INCR'd). Shared across nodes —
+ * not per-node — so the base is counted once, not once per node that
+ * happens to INCR after seeing the same SET. The empty string can never
+ * collide with a real node id (see cluster/nodeId.ts).
+ */
+export const SEED_ORIGIN = '';
+
+/** Default contribution origin when INCR is called outside HA (single-node/tests) — one origin, so the sum is just the count. */
+const LOCAL_ORIGIN = 'local';
+
+function sumContributions(contributions: Map<string, number>): number {
+  let total = 0;
+  for (const n of contributions.values()) total += n;
+  return total;
+}
+
 export interface StoreLimits {
   /** Max distinct keys; a new-key write past this is rejected with OOM. 0 disables. */
   maxKeys?: number;
@@ -189,21 +207,37 @@ export class Store {
     this.put(key, { type: 'string', value, expiresAtMs });
   }
 
-  incr(key: string): number {
+  incr(key: string, originId: string = LOCAL_ORIGIN): number {
     const entry = this.requireType<StringEntry>(key, 'string');
-    const current = entry ? entry.value : '0';
-    if (!/^-?\d+$/.test(current)) throw new NotAnIntegerError();
-    const next = Number(current) + 1;
-    if (!Number.isSafeInteger(next)) throw new NotAnIntegerError();
-    if (entry) {
-      this.memoryBytes -= estimateEntrySize(key, entry);
-      entry.value = String(next);
-      this.memoryBytes += estimateEntrySize(key, entry);
-    } else {
+    if (entry === undefined) {
       this.ensureRoomForNewKey();
-      this.put(key, { type: 'string', value: String(next), expiresAtMs: null });
+      // Brand-new counter: this origin has contributed 1, base 0.
+      this.put(key, { type: 'string', value: '1', expiresAtMs: null, contributions: new Map([[originId, 1]]) });
+      return 1;
     }
-    return next;
+    if (!/^-?\d+$/.test(entry.value)) throw new NotAnIntegerError();
+
+    // Promote a plain integer string (e.g. one a SET left) into a counter,
+    // parking its current value under the shared SEED origin so increments
+    // add on top of it without that base being attributed to any real node.
+    let contributions = entry.contributions;
+    if (contributions === undefined) {
+      contributions = new Map();
+      const base = Number(entry.value);
+      if (base !== 0) contributions.set(SEED_ORIGIN, base);
+    }
+    const nextForOrigin = (contributions.get(originId) ?? 0) + 1;
+    const before = estimateEntrySize(key, entry);
+    contributions.set(originId, nextForOrigin);
+    const total = sumContributions(contributions);
+    if (!Number.isSafeInteger(total)) {
+      contributions.set(originId, nextForOrigin - 1); // roll back the increment we can't represent
+      throw new NotAnIntegerError();
+    }
+    entry.contributions = contributions;
+    entry.value = String(total);
+    this.memoryBytes += estimateEntrySize(key, entry) - before;
+    return total;
   }
 
   // ---- hashes -------------------------------------------------------------
@@ -389,7 +423,60 @@ export class Store {
    * that decision so applying a remote event doesn't re-broadcast it.
    */
   applyReplicatedUpsert(key: string, entry: Entry): void {
+    // Two counters for the same key must MERGE (max per origin), not
+    // overwrite: a whole-entry counter snapshot from hydration or
+    // anti-entropy arriving over a locally-newer counter would otherwise
+    // revert this node's own not-yet-persisted increments. A plain string
+    // (a SET, no contributions) still replaces — SET is last-write-wins and
+    // deliberately clears any counter state. Non-counter entries just replace.
+    const existing = this.data.get(key);
+    if (entry.type === 'string' && entry.contributions && existing?.type === 'string' && existing.contributions) {
+      const before = estimateEntrySize(key, existing);
+      for (const [origin, total] of entry.contributions) {
+        existing.contributions.set(origin, Math.max(existing.contributions.get(origin) ?? 0, total));
+      }
+      existing.value = String(sumContributions(existing.contributions));
+      existing.expiresAtMs = entry.expiresAtMs;
+      this.memoryBytes += estimateEntrySize(key, existing) - before;
+      return;
+    }
     this.put(key, entry);
+  }
+
+  /**
+   * Applies a replicated INCR — folds one origin's cumulative contribution
+   * into the local counter by MAX (never a blind overwrite), so the same
+   * event delivered twice, out of order, or after a snapshot that already
+   * included it is idempotent and can't double-count. Creates the counter
+   * if absent; seeds a plain integer string's base under SEED_ORIGIN first,
+   * exactly like local INCR. Bypasses admission control (the origin already
+   * accepted the write). A no-op if the key is a non-string type.
+   */
+  applyReplicatedIncrement(key: string, originId: string, originTotal: number): void {
+    const existing = this.data.get(key);
+    if (existing !== undefined && existing.type !== 'string') return;
+    if (existing === undefined) {
+      this.put(key, { type: 'string', value: String(originTotal), expiresAtMs: null, contributions: new Map([[originId, originTotal]]) });
+      return;
+    }
+    const before = estimateEntrySize(key, existing);
+    let contributions = existing.contributions;
+    if (contributions === undefined) {
+      contributions = new Map();
+      const base = /^-?\d+$/.test(existing.value) ? Number(existing.value) : 0;
+      if (base !== 0) contributions.set(SEED_ORIGIN, base);
+    }
+    contributions.set(originId, Math.max(contributions.get(originId) ?? 0, originTotal));
+    existing.contributions = contributions;
+    existing.value = String(sumContributions(contributions));
+    this.memoryBytes += estimateEntrySize(key, existing) - before;
+  }
+
+  /** This origin's cumulative contribution to a counter key, for replicating an INCR as a commutative per-origin total. 0 if absent/not a counter. */
+  contributionFor(key: string, originId: string): number {
+    const entry = this.getLive(key);
+    if (entry?.type !== 'string' || entry.contributions === undefined) return 0;
+    return entry.contributions.get(originId) ?? 0;
   }
 
   /** Removes a key as a result of hydration or a replicated delete, without cascading further replication. */
@@ -487,6 +574,9 @@ function estimateEntrySize(key: string, entry: Entry): number {
   let size = key.length * 2 + 48; // rough per-entry overhead
   if (entry.type === 'string') {
     size += entry.value.length * 2;
+    if (entry.contributions) {
+      for (const [origin] of entry.contributions) size += origin.length * 2 + 16;
+    }
   } else if (entry.type === 'hash') {
     for (const [f, v] of entry.fields) size += (f.length + v.length) * 2 + 16;
   } else {
