@@ -54,11 +54,11 @@ const METHOD_TO_COMMAND: Record<string, string> = {
   pSubscribe: 'PSUBSCRIBE',
   unsubscribe: 'UNSUBSCRIBE',
   pUnsubscribe: 'PUNSUBSCRIBE',
-  // Commonly-used commands BackendCache deliberately does not implement (§3) —
-  // listed explicitly so a hit produces an actionable message, not a silent miss.
   eval: 'EVAL',
   evalSha: 'EVALSHA',
-  scriptLoad: 'SCRIPT LOAD',
+  scriptLoad: 'SCRIPT',
+  // Commonly-used commands BackendCache deliberately does not implement (§3) —
+  // listed explicitly so a hit produces an actionable message, not a silent miss.
   lPush: 'LPUSH',
   rPush: 'RPUSH',
   sAdd: 'SADD',

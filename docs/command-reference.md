@@ -31,6 +31,8 @@ by integration tests against the real client libraries that use it — see
 | `PUBLISH` | Returns the number of subscribers reached (exact-channel + matching-pattern). |
 | `SUBSCRIBE` / `PSUBSCRIBE` | Switch the connection into subscriber mode. `PSUBSCRIBE` uses Redis glob syntax (`*`, `?`, `[...]`). |
 | `UNSUBSCRIBE` / `PUNSUBSCRIBE` | With no arguments, unsubscribes from everything the connection currently holds (needed for a clean adapter shutdown). |
+| `EVAL` / `EVALSHA` | Run a Lua script on an embedded Lua 5.3 VM. `KEYS`/`ARGV` are 1-indexed; `redis.call`/`redis.pcall` dispatch back through the command layer — see below. |
+| `SCRIPT LOAD` / `EXISTS` / `FLUSH` | Manage the process-wide SHA1 script cache. `LOAD` returns the digest; `EXISTS` reports per-SHA presence; `FLUSH` clears it. |
 
 Anything not in this table returns `ERR unknown command` rather than
 silently no-opping, so a caller using an unsupported command is caught
@@ -67,11 +69,34 @@ This makes BackendCache a drop-in for the mainstream lock and
 session/cache-store ecosystem (`SET … NX PX` locks, `connect-redis`,
 `cache-manager`, `keyv`) on top of the original rate-limit / pub-sub surface.
 
+## Lua scripting
+
+`EVAL`/`EVALSHA` run on an embedded [fengari](https://fengari.io/) Lua 5.3
+VM (see [`src/scripting/luaEngine.ts`](../src/scripting/luaEngine.ts)):
+
+- `KEYS` and `ARGV` are exposed as 1-indexed global tables.
+- `redis.call(cmd, ...)` and `redis.pcall(cmd, ...)` dispatch back through the
+  same command layer a client uses — so a mutation performed inside a script
+  replicates across nodes exactly like the same command sent directly
+  (Redis's "effects replication"). `redis.call` raises a command error and
+  aborts the script; `redis.pcall` returns it as an `{err=...}` table.
+- Lua↔RESP conversion follows Redis: number→integer (truncated), string→bulk,
+  `false`→nil, `true`→`:1`, table→array (stopping at the first nil),
+  `{ok=...}`→status, `{err=...}`→error. `redis.error_reply`,
+  `redis.status_reply`, and `redis.sha1hex` are provided.
+- A fresh sandboxed state is created per invocation with only the
+  deterministic libraries (`base`, `table`, `string`, `math`) — no `io`,
+  `os`, `package`, or `debug`. Connection/pubsub/scripting commands
+  (`SUBSCRIBE`, `EVAL`, `AUTH`, …) are rejected from inside a script.
+
+This means `rate-limit-redis`'s **default** (Lua) store works against
+BackendCache directly — the [rate-limit store deviation](./rate-limit-store.md)
+is now optional, not required.
+
 ## Non-goals
 
 | Excluded | Why |
 |---|---|
-| `EVAL` / `EVALSHA` / `SCRIPT LOAD` (Lua scripting) | No embedded Lua runtime — and none is needed for cross-node atomicity either: HA replication and Cosmos DB persistence use plain upserts/deletes/Patch-API calls, no stored procedures. `rate-limit-redis`'s default store needs Lua — see [The rate-limit store deviation](./rate-limit-store.md) for the one place a consuming app needs a small workaround. |
 | Redis-native persistence (RDB snapshots, AOF) | Durability is handled differently here — key state is persisted to Cosmos DB as part of cross-node replication (see [High availability](./high-availability.md)), not via Redis's own snapshot/append-only-file formats. `PUBLISH` messages are still never persisted anywhere, matching real Redis pub/sub's fire-and-forget semantics. |
 | Redis-native clustering/sharding (`CLUSTER *`, hash slots) | BackendCache's own multi-node HA (see [High availability](./high-availability.md)) is a from-scratch active-active design over Service Bus + Cosmos DB, not an implementation of Redis Cluster's protocol — no consuming app in scope talks `CLUSTER *`. |
 | RESP3, ACLs, other data types (lists, sets, streams, geo, bitmaps, HyperLogLog) | Add on demand when a real caller needs them; don't build speculatively. |

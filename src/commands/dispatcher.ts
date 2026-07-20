@@ -5,8 +5,9 @@ import * as stringCommands from './stringCommands.js';
 import * as hashCommands from './hashCommands.js';
 import * as sortedSetCommands from './sortedSetCommands.js';
 import * as pubsubCommands from './pubsubCommands.js';
+import * as scriptingCommands from './scriptingCommands.js';
 
-interface CommandSpec {
+export interface CommandSpec {
   handler: CommandHandler;
   /** Allowed before AUTH completes, when auth is required. */
   allowedPreAuth: boolean;
@@ -70,7 +71,7 @@ const allArgsAsKeys = (args: string[]): string[] => args;
 /** MSET args are [key value key value ...]; the mutated keys are the even positions. */
 const msetKeys = (args: string[]): string[] => args.filter((_, i) => i % 2 === 0);
 
-const COMMANDS: Record<string, CommandSpec> = {
+export const COMMANDS: Record<string, CommandSpec> = {
   PING: spec(connectionCommands.ping, { allowedPreAuth: true, allowedInSubscriberMode: true }),
   HELLO: spec(connectionCommands.hello, { allowedPreAuth: true }),
   AUTH: spec(connectionCommands.auth, { allowedPreAuth: true }),
@@ -97,6 +98,10 @@ const COMMANDS: Record<string, CommandSpec> = {
   ZADD: spec(sortedSetCommands.zadd, { fieldReplication: 'zset' }),
   ZREMRANGEBYSCORE: spec(sortedSetCommands.zremrangebyscore, { fieldReplication: 'zset' }),
   ZCOUNT: spec(sortedSetCommands.zcount),
+
+  EVAL: spec(scriptingCommands.evalCommand),
+  EVALSHA: spec(scriptingCommands.evalshaCommand),
+  SCRIPT: spec(scriptingCommands.scriptCommand),
 
   PUBLISH: spec(pubsubCommands.publish),
   SUBSCRIBE: spec(pubsubCommands.subscribe, { allowedInSubscriberMode: true }),
@@ -226,6 +231,20 @@ export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcom
     return { command, frames: [subscriberModeError(command)], isError: true };
   }
 
+  return runCommand(ctx, command, args, cmdSpec);
+}
+
+/**
+ * Runs an already-resolved command: captures any pre-mutation state HA
+ * replication needs, invokes the handler, then ships the resulting effects to
+ * the cluster. Shared by dispatch() (top-level client commands) and by script
+ * execution (redis.call inside EVAL) so a mutation performed inside a script
+ * replicates exactly like the same command sent directly — Redis's "effects
+ * replication". The connection-level gates (auth, subscriber mode) live in
+ * dispatch() and are intentionally NOT repeated here: a script runs with the
+ * privileges its already-authenticated connection holds.
+ */
+export function runCommand(ctx: CommandContext, command: string, args: string[], cmdSpec: CommandSpec): DispatchOutcome {
   // Everything captured here happens *before* running the handler, and is
   // skipped entirely in standalone mode (the default/common case), where
   // it would just be discarded — no reason to pay for existence checks or
