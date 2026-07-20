@@ -6,7 +6,6 @@ import { ClusterCoordinator } from './clusterCoordinator.js';
 import { NullDurableStore, type DurableStore } from './durableStore.js';
 import { NullReplicationTransport, type ReplicationTransport } from './replicationTransport.js';
 import { resolveNodeId } from './nodeId.js';
-import { logger } from '../logger.js';
 
 export interface ClusterCoordinatorHostDeps {
   store: Store;
@@ -36,11 +35,19 @@ export async function createClusterCoordinator(
   const hasDurableStore = hasDurableStoreConfigured(config);
   const hasTransport = hasReplicationTransportConfigured(config);
   if (hasDurableStore !== hasTransport) {
-    logger.warn('cluster.partial_configuration', {
-      hint: 'Cosmos DB and Service Bus must both be configured to run in HA mode; falling back to standalone (single-node) mode',
-      cosmosConfigured: hasDurableStore,
-      serviceBusConfigured: hasTransport,
-    });
+    // Partial HA config is never intentional: exactly one of Cosmos DB /
+    // Service Bus set means a typo'd env var or a missed secret. Silently
+    // falling back to standalone at minReplicas >= 2 yields split-brain
+    // (independent, non-replicating per-connection keyspaces), so crash
+    // instead — the orchestrator retries with backoff and the misconfig is
+    // loud rather than a subtly wrong runtime. This fires regardless of
+    // REQUIRE_HA; there is no supported "durable but no cross-node sync"
+    // (or vice-versa) mode to fall back to.
+    throw new Error(
+      'Partial HA configuration: exactly one of Cosmos DB and Service Bus is configured ' +
+        `(Cosmos DB: ${hasDurableStore}, Service Bus: ${hasTransport}). ` +
+        'Configure BOTH for HA (multi-node) mode, or NEITHER for standalone (single-node) mode.',
+    );
   }
 
   // Split-brain guard. When REQUIRE_HA is set (the multi-replica Bicep sets

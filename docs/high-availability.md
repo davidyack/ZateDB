@@ -237,22 +237,35 @@ Setting neither Cosmos DB nor Service Bus configuration (see
 [Deployment](./deployment.md#configuration)) runs BackendCache exactly as
 a single node with an in-memory-only store — identical behavior to
 running one replica, useful for local development and the test suite.
-Configuring only one of the two is treated as a misconfiguration (logged
-as `cluster.partial_configuration`) and also falls back to standalone,
-since running with real persistence but no cross-node sync (or vice
-versa) would silently violate the HA guarantee rather than loudly failing
-closed to the well-understood single-node behavior.
 
-**`REQUIRE_HA=true` turns that fallback into a hard startup failure.** A
+> ### ⚠️ No HA ⇒ run exactly one replica
+>
+> A standalone node **cannot detect that it is one of several replicas** —
+> with no shared backend there is no channel through which peers could even
+> announce themselves. So when HA is not configured, BackendCache *is* a
+> single node, and the deployment must enforce that with **`minReplicas =
+> maxReplicas = 1`**. Run two or more replicas without HA and each serves
+> its own in-memory keyspace behind one connection-spraying load balancer:
+> a `SET`/`SUBSCRIBE` on one connection is invisible to a `GET`/`PUBLISH`
+> on another (the split-brain that breaks presence mirroring and pub/sub
+> fan-out). Nothing inside the process can catch this — the guardrails below
+> cover the *configuration* mistakes it can see; the *replica-count* mistake
+> is yours to prevent at the platform, and to alert on via the
+> `backendcache.cluster.ha_enabled` metric joined with the platform's own
+> replica count (see [Observability](./observability.md#metrics)).
+
+**Partial HA config is a hard startup failure.** Configuring only one of
+Cosmos DB / Service Bus is never intentional — real persistence with no
+cross-node sync (or vice versa) would silently violate the HA guarantee —
+so the process **crashes at startup** (not just with `REQUIRE_HA`), and
+Container Apps' restart policy surfaces the misconfiguration loudly. There
+is no supported half-HA mode to fall back to.
+
+**`REQUIRE_HA=true` additionally rejects a *missing* HA config.** A
 multi-replica deployment (the Bicep pins `minReplicas: 2`) must *never*
-silently run standalone: a typo'd env var or a missed secret would
-otherwise leave two or more independent, non-replicating nodes behind one
-connection-spraying load balancer — divergent per-connection keyspaces,
-the exact correctness failure the old single-replica invariant existed to
-prevent, visible only as a warn-level log. With `REQUIRE_HA` set, a
-partial or missing HA config crashes the process at startup instead, so
-Container Apps' restart policy surfaces the misconfiguration loudly rather
-than serving split-brain traffic. It is set in
+silently run standalone; with `REQUIRE_HA` set, starting with neither
+dependency configured also crashes rather than running as independent
+non-replicating nodes. It is set in
 [`infra/backendcache.bicep`](../infra/backendcache.bicep); leave it unset
 for local development and the test suite, where standalone is the intended
 mode.
@@ -267,8 +280,8 @@ mode.
   permanently-failing readiness probe is a worse failure mode than a
   crash-loop Container Apps' restart policy can retry with backoff. This
   is also why a partially-configured environment (Cosmos DB set, Service
-  Bus not, or vice versa) falls back to standalone instead of half-running
-  HA — see [Standalone mode](#standalone-mode) above.
+  Bus not, or vice versa) crashes at startup instead of half-running HA —
+  see [Standalone mode](#standalone-mode) above.
 - **Replication death is detected, not silent**: the receiver treats a
   vanished subscription (`MessagingEntityNotFound`) or a sustained run of
   receive errors as fatal and exits the process (non-zero), so the
