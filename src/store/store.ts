@@ -451,6 +451,20 @@ export class Store {
    * if absent; seeds a plain integer string's base under SEED_ORIGIN first,
    * exactly like local INCR. Bypasses admission control (the origin already
    * accepted the write). A no-op if the key is a non-string type.
+   *
+   * Note on origin growth (deferred compaction): a long-lived *persisted*
+   * counter accrues one contribution entry per origin (≈ per deploy
+   * generation, since Container Apps replica names rotate). Compacting dead
+   * origins into SEED at hydration looks tempting but is unsafe with the
+   * max-merge above: if a "dead" origin were actually only lapsed and later
+   * re-sent its cumulative total, that total (which includes what was folded
+   * into SEED) would be re-added, permanently double-counting on the
+   * compacting node and diverging it from its peers. Safe compaction needs a
+   * reliable "origin is permanently gone" signal (generation id / graceful
+   * tombstone) that doesn't exist today. Low urgency: with
+   * DURABILITY_MIN_TTL_MS on, short-TTL counters aren't persisted and never
+   * hydrate, so only rare long-lived counters accumulate. Revisit if the
+   * per-counter origin count is ever a measured problem.
    */
   applyReplicatedIncrement(key: string, originId: string, originTotal: number): void {
     const existing = this.data.get(key);

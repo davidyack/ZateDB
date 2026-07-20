@@ -21,6 +21,8 @@ export interface ServerConfig {
   maxFailedAuthAttempts: number;
   /** Idle (no-traffic) timeout in ms after which a non-subscriber connection is closed. 0 disables. */
   idleTimeoutMs: number;
+  /** Log any command whose execution takes at least this many ms (redacted key), for latency diagnosis. 0 disables. */
+  slowCommandLogMs: number;
   /** Max declared bulk-string length the parser will accept for a single argument. */
   maxBulkBytes: number;
   /** Max pending unparsed bytes buffered per connection before the connection is killed. */
@@ -124,6 +126,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxClients: intFromEnv(env, 'MAX_CLIENTS', 10_000),
     maxFailedAuthAttempts: intFromEnv(env, 'MAX_FAILED_AUTH_ATTEMPTS', 5),
     idleTimeoutMs: intFromEnv(env, 'IDLE_TIMEOUT_MS', 5 * 60_000),
+    slowCommandLogMs: intFromEnv(env, 'SLOW_COMMAND_LOG_MS', 0),
     maxBulkBytes: intFromEnv(env, 'MAX_BULK_BYTES', 8 * MiB),
     maxBufferBytes: intFromEnv(env, 'MAX_BUFFER_BYTES', 16 * MiB),
     outboundHighWaterMarkBytes: intFromEnv(env, 'MAX_OUTBOUND_BUFFER_BYTES', 32 * MiB),

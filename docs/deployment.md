@@ -44,6 +44,7 @@ See [High availability](./high-availability.md) for the architecture these enabl
 | `REQUIRE_HA` | `false` | When `true`, refuse to start unless HA is fully configured (both Cosmos DB and Service Bus). Set in the multi-replica deployment so a partial or missing config crash-loops instead of silently running split-brain standalone nodes behind one load balancer. Leave unset for local/standalone use — see [High availability](./high-availability.md#standalone-mode) |
 | `SHUTDOWN_HARD_LIMIT_MS` | `10000` | Hard ceiling on graceful shutdown. `cluster.stop()`'s network calls (replication drain, Service Bus subscription delete) hanging — especially on the crash path — would otherwise leave a zombie that never exits; this force-exits instead |
 | `MAX_FAILED_AUTH_ATTEMPTS` | `5` | Consecutive failed `AUTH` attempts on one connection before it's dropped, forcing a full reconnect per burst of guesses to blunt line-speed password brute force. `0` disables |
+| `SLOW_COMMAND_LOG_MS` | `0` (off) | Log any command taking at least this many ms (with a redacted key), for latency diagnosis. Commands are normally sub-millisecond, so a small value like `10` is high-signal; `0` disables |
 
 A consuming application points its `REDIS_URL` at BackendCache exactly as
 it would at real Redis — e.g. `redis://:<password>@backendcache:6379` —
