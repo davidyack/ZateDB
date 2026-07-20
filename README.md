@@ -67,9 +67,28 @@ docker build -t zatedb:latest .
 docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 zatedb:latest
 ```
 
-`infra/zatedb.bicep` is a sketch for a multi-node Azure Container
-App (2+ replicas) with internal-only ingress, wired to Service Bus and
-Cosmos DB for cross-node sync. See [Deployment](./docs/deployment.md) for
+For Azure, `infra/modules/zatedb.bicep` is a Bicep module you drop into your
+application's own template. It runs ZateDB as a multi-node Container App
+(2+ replicas) with internal-only ingress, and creates its own identity,
+Service Bus topic, Cosmos database/containers, and role assignments inside
+infrastructure you already have:
+
+```bicep
+module zatedb 'modules/zatedb.bicep' = {
+  name: 'zatedb'
+  params: {
+    namePrefix: 'contoso'
+    managedEnvironmentId: containerAppsEnvironment.id
+    containerImage: 'myregistry.azurecr.io/zatedb:abc123'
+    serviceBusNamespaceName: serviceBus.name
+    cosmosAccountName: cosmos.name
+    authPassword: redisPassword
+  }
+}
+```
+
+See [`infra/README.md`](./infra/README.md) for what it expects and the
+already-have-Cosmos variants, and [Deployment](./docs/deployment.md) for
 configuration options and the full picture.
 
 ## Docs
