@@ -8,17 +8,49 @@ import { redactKey } from '../telemetry/commandTelemetry.js';
 import { errorMessage, logger } from '../logger.js';
 
 /**
+ * Accumulated field/member changes for one key, so consecutive queued
+ * `HSET`/`HDEL` (or `ZADD`/`ZREMRANGEBYSCORE`) tasks fold into one net patch
+ * + one event: a later set of a field wins over an earlier set or delete of
+ * it, and a later delete wins over an earlier set. `set` values are strings
+ * for hashes and numbers (scores) for sorted sets.
+ */
+interface FieldPayload {
+  type: 'hash' | 'zset';
+  set: Map<string, string | number>;
+  del: Set<string>;
+}
+
+/**
+ * Folds `next` into `acc` in place: for a container-typed key, a later
+ * operation on a field/member supersedes an earlier one — a set clears any
+ * pending delete of the same name and vice versa.
+ */
+function mergeFieldPayload(acc: FieldPayload, next: FieldPayload): void {
+  for (const [name, value] of next.set) {
+    acc.set.set(name, value);
+    acc.del.delete(name);
+  }
+  for (const name of next.del) {
+    acc.del.add(name);
+    acc.set.delete(name);
+  }
+}
+
+/**
  * A queued replication side-effect for one key. `coalesceClass` groups
  * writes that fully supersede one another: two consecutive `'whole'` writes
- * (SET/INCR/DEL — each ships the key's entire post-state) collapse to the
- * later one, and two consecutive `'ttl'` writes likewise. Field/member
- * deltas use `'field'` and never coalesce (each carries a distinct
- * field/member change that a later one doesn't contain), and mixed classes
- * never coalesce across each other, preserving order.
+ * (SET/DEL — each ships the key's entire post-state) collapse to the later
+ * one, `'ttl'` and `'incr'` likewise. `'field'` tasks carry a mutable
+ * `field` payload that later same-key field tasks merge into (so
+ * HSET/HDEL/ZADD/ZREMRANGEBYSCORE bursts on one key collapse to a single net
+ * patch + event). Mixed classes never coalesce across each other, preserving
+ * order.
  */
 interface ReplicationTask {
   coalesceClass: 'whole' | 'ttl' | 'field' | 'incr';
   run: () => Promise<void>;
+  /** Present only for the 'field' class — the accumulator later field tasks merge into. */
+  field?: FieldPayload;
 }
 
 export interface ClusterCoordinatorDeps {
@@ -343,7 +375,7 @@ export class ClusterCoordinator {
    */
   publishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): void {
     if (!this.haEnabled || (setFields.length === 0 && deletedFields.length === 0)) return;
-    this.enqueueForKey(key, 'field', () => this.doPublishHashFieldChange(key, setFields, deletedFields));
+    this.enqueueFieldForKey(key, { type: 'hash', set: new Map(setFields), del: new Set(deletedFields) });
   }
 
   private async doPublishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): Promise<void> {
@@ -358,7 +390,42 @@ export class ClusterCoordinator {
   /** Same idea as publishHashFieldChange, for ZADD/ZREMRANGEBYSCORE — see that method's doc comment. */
   publishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): void {
     if (!this.haEnabled || (setMembers.length === 0 && deletedMembers.length === 0)) return;
-    this.enqueueForKey(key, 'field', () => this.doPublishZsetMemberChange(key, setMembers, deletedMembers));
+    this.enqueueFieldForKey(key, { type: 'zset', set: new Map(setMembers), del: new Set(deletedMembers) });
+  }
+
+  /**
+   * Field/member replication with coalescing: consecutive not-yet-started
+   * field tasks for the same key (and same container type) merge into one
+   * net patch + one event, so a high-churn presence hash (the same field
+   * flapping online/offline) or a sliding-window zset costs one Cosmos
+   * patch + one Service Bus message per drain, not one per command. The
+   * running task was already shifted off the front, so merging only ever
+   * folds into a queued task, never an in-flight one.
+   */
+  private enqueueFieldForKey(key: string, payload: FieldPayload): void {
+    let queue = this.replicationQueue.get(key);
+    if (queue === undefined) {
+      queue = [];
+      this.replicationQueue.set(key, queue);
+    }
+    const tail = queue[queue.length - 1];
+    if (tail !== undefined && tail.coalesceClass === 'field' && tail.field !== undefined && tail.field.type === payload.type) {
+      // The tail's run closure reads tail.field at execution time, so
+      // mutating it in place is all that's needed to coalesce.
+      mergeFieldPayload(tail.field, payload);
+    } else {
+      const field = payload;
+      queue.push({ coalesceClass: 'field', field, run: () => this.doPublishFieldPayload(key, field) });
+    }
+    if (!this.draining.has(key)) this.startDraining(key);
+  }
+
+  private doPublishFieldPayload(key: string, field: FieldPayload): Promise<void> {
+    const del = [...field.del];
+    if (field.type === 'hash') {
+      return this.doPublishHashFieldChange(key, [...field.set].map(([f, v]) => [f, v as string]), del);
+    }
+    return this.doPublishZsetMemberChange(key, [...field.set].map(([m, s]) => [m, s as number]), del);
   }
 
   private async doPublishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): Promise<void> {

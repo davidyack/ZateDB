@@ -81,15 +81,23 @@ The exact *shape* of what's replicated depends on the command:
   own preserves the field-granularity guarantee (see the TTL bullet in the
   consistency model).
 
-**Write coalescing.** Same-key whole-key writes (`SET`/`INCR`/`DEL`) that
-queue up faster than they drain are collapsed to the latest one before the
-network round trip: a burst of N `INCR`s on one hot counter costs one
-in-flight Cosmos write plus one coalesced write, not N — each absolute
-upsert fully supersedes the previous, so shipping the intermediates would
-be wasted Cosmos RUs and Service Bus operations. Field/member deltas and
-TTL changes are never coalesced away (each carries a distinct change a
-later one doesn't contain), and coalescing never reorders across different
-kinds, so a `SET` → `EXPIRE` → `HSET` sequence on one key stays ordered.
+**Write coalescing.** Same-key writes that queue up faster than they drain
+are collapsed before the network round trip, so a hot key costs roughly one
+Cosmos write + one Service Bus message per drain instead of one per command:
+
+- Whole-key writes (`SET`/`DEL`), `INCR` contributions, and `TTL` changes
+  each collapse to the *latest* queued write of their class — each fully
+  supersedes the previous (an absolute value, a cumulative counter total, an
+  expiry).
+- Field/member deltas (`HSET`/`HDEL`/`ZADD`/`ZREMRANGEBYSCORE`) **merge**
+  rather than collapse: queued changes for the same key fold into one net
+  patch + event, where a later set of a field wins over an earlier set or
+  delete of it and vice versa. A presence field flapping online/offline, or
+  a sliding window churning members, costs one patch per drain, not one per
+  flap.
+
+Coalescing never reorders across different kinds, so a `SET` → `EXPIRE` →
+`HSET` sequence on one key stays ordered.
 
 This is **fire-and-forget relative to the client's reply** — the RESP
 response the client already received reflects the fast local mutation,
