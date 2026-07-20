@@ -59,6 +59,9 @@ param minReplicas int = 2
 @description('Maximum replica count for autoscale')
 param maxReplicas int = 5
 
+@description('Skip the Cosmos write for keys whose remaining TTL is under this (ms); peers still converge over Service Bus. 60s removes the dominant rate-limit/sliding-window RU. 0 persists everything. See docs/high-availability.md#cost.')
+param durabilityMinTtlMs int = 60000
+
 resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${namePrefix}-backendcache'
   location: location
@@ -122,6 +125,12 @@ resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'COSMOS_DATABASE', value: cosmosDatabaseName }
             { name: 'COSMOS_KEYS_CONTAINER', value: cosmosKeysContainerName }
             { name: 'COSMOS_NODES_CONTAINER', value: cosmosNodesContainerName }
+            // Cost: don't persist keys that expire within a minute
+            // (rate-limit / sliding-window churn — the dominant write rate).
+            // Peers still converge over Service Bus; the trade is that a
+            // full-cluster restart loses sub-threshold keys, which reset in
+            // seconds anyway. See docs/high-availability.md#cost.
+            { name: 'DURABILITY_MIN_TTL_MS', value: string(durabilityMinTtlMs) }
           ]
           probes: [
             {
