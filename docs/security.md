@@ -15,7 +15,7 @@
   independently rotatable — different blast radius. The `AUTH` password
   lets a caller read/write cache data as the app would; the admin token
   lets a caller inspect and delete arbitrarily via the
-  [admin surface](./observability.md#admin-api). In HA mode, a `DELETE`
+  [admin surface](/docs/observability.md#admin-api). In HA mode, a `DELETE`
   through the admin API propagates cluster-wide, so the admin token's
   blast radius is the whole cluster, not just the node answering the
   request.
