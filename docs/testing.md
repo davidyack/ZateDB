@@ -102,3 +102,33 @@ unsupported command fails the build instead of failing silently in
 production — this is the exact mechanism that would have caught a
 scoping gap immediately, rather than discovering it as a production
 incident later.
+
+## Performance benchmark
+
+[`scripts/benchmark.ts`](../scripts/benchmark.ts) is a client-side
+throughput/latency probe. It drives the same `redis` (node-redis v5) client
+the consuming app uses and only issues commands from the
+[supported table](./command-reference.md), so it's meaningful out of the box
+— unlike `redis-benchmark`/`memtier_benchmark`, which default to commands
+BackendCache doesn't implement and need hand-tuned flags to stay inside the
+command surface.
+
+```bash
+npm run bench                          # in-process server, default mix
+npm run bench -- -n 200000 -c 100      # 200k ops/command, 100 in flight
+npm run bench -- -t set,get,incr       # only these commands
+npm run bench -- --url redis://host:6379   # against a running instance (add :pw@ for AUTH)
+```
+
+By default it boots an in-process BackendCache on an ephemeral loopback port
+(the same way the integration tests do), so no running instance is required;
+`--url` (or `REDIS_URL`) measures the real network path instead. It reports
+per-command ops/sec and latency percentiles (avg/p50/p95/p99/max).
+
+This is a probe, not a formal benchmark: numbers depend on the machine, Node
+version, and (for `--url`) the network hop — use it to catch regressions and
+compare configurations, not as an absolute figure. It measures a single
+BackendCache node driven directly by one client; it deliberately does not
+exercise cross-node HA replication (see
+[Architecture](./architecture.md)) — that path is covered by the
+integration tests above, not this throughput probe.
