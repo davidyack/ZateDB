@@ -1,49 +1,51 @@
-# BackendCache — Comprehensive Architectural Review (Third Pass: the HA Pivot)
+# BackendCache — Comprehensive Architectural Review (Fourth Pass: Cost, on a Committed Architecture)
 
-**Date:** 2026-07-19 (third pass)
-**Scope:** Full repository at commit `3f40031` — source (`src/`, including the new `src/cluster/`), tests, Dockerfile, Bicep infra, and docs.
-**Context:** Since the second pass (at `65ca295`), PR #7 landed **multi-node high availability**: 2+ replicas behind Container Apps' internal TCP ingress, cross-node replication over an Azure Service Bus topic, and Cosmos DB as a durable backing store with startup hydration (~1,500 lines of new distributed-systems code plus 40 new tests). This is a fundamental architectural pivot — the two prior reviews were built around a documented single-replica invariant that this change deliberately retires. This pass reviews the HA design and implementation, re-checks the second pass's open items, and re-scores every lens.
-**Verification:** typecheck clean, **142/142 tests passing** at head (including the new `clusterCoordinator`, `dispatcherReplication`, `haReplication`, and `adminServer` suites).
+**Date:** 2026-07-20 (fourth pass)
+**Scope:** Full repository at commit `7e0b767` — source, tests, Dockerfile, Bicep infra, and docs.
+**Context:** Since the third pass (at `3f40031`), PR #10 landed fixes for **every third-pass finding**: the five pre-production HA defects, G-counter `INCR` replication, anti-entropy, managed-identity auth, and the carried-over hardening floor (~1,900 lines including tests). Separately, the review's framing has changed on direction from the owner: **managed Redis is not an alternative** — it has failed to deploy 20+ times in this Azure environment, and the Cosmos DB + Service Bus HA architecture is the committed approach. The third pass's "premise question" is therefore answered and closed. This pass verifies PR #10's fixes and re-runs the review with the cost lens re-anchored accordingly: not "should this exist," but **"how do we make this exact architecture as cheap as possible to run"** — while keeping the other lenses current.
+**Verification:** typecheck clean, **183/183 tests passing** at head (including the new `adversarialReplication`, `authThrottle`, and `clusterFactory` suites and the expanded coordinator/store/dispatcher tests).
 
----
-
-## Status of the Second-Pass Top 10
-
-PR #7 went a different direction (HA) rather than working the second-pass list; most items remain open, and several got *more* important because HA multiplies their cost:
-
-| Second-pass item | Status |
-|---|---|
-| 1. Memory ceiling not enforced on existing-key growth | **Open** — and HA adds two more deliberate bypasses: replicated applies and startup hydration skip the ceiling entirely (see new findings) |
-| 2. O(entry-size) accounting on hash/zset writes | **Open** — now also paid on every *replicated* apply, so a busy peer's writes tax this node too |
-| 3. O(keyspace) `stats()` walk per metric scrape | **Open** — and the new cluster heartbeat calls `store.stats()` every 10 s on top of it |
-| 4. Failed-`AUTH` throttling | **Open** |
-| 5. Incremental TTL sweep | **Open** |
-| 6. Digest-pinned base image + `npm audit` in CI | **Open** |
-| 7. Slow-command log + sweep-duration metric | **Open** (subscription lifecycle logging was added — useful, adjacent) |
-| 8. Bounded crash-path shutdown | **Open** — and shutdown now also awaits `cluster.stop()` (Service Bus/Cosmos calls), lengthening the unbounded tail |
-| 9. Admin-port reachability docs + runbook | **Open** — more pressing now that `/admin/nodes` is the cluster-membership view |
-| 10. Load-test ceilings, dead-code nits | **Open** — and the question is bigger now: replication adds a Cosmos write + Service Bus publish per mutation |
-
-One second-pass recommendation *was* effectively delivered by the HA work: a true readiness/liveness split (`/readyz` gates on hydration; `/healthz` never does), correctly wired into the Bicep probes.
+> **Decision record (recommend committing this to the repo, e.g. in `docs/high-availability.md`):** *Azure Cache for Redis was evaluated and rejected as the cross-replica backend after 20+ failed deployment attempts in this environment. BackendCache's Cosmos DB + Service Bus HA design is the committed architecture; future reviews optimize within it rather than relitigating it.* The earlier passes asked for exactly this kind of documented decision; it now exists — it should live in the repo, not in a chat thread.
 
 ---
 
-## Top 10 Changes to Make Today (Third Pass)
+## Verification of the Third-Pass Top 10
 
-Ranked by severity × immediacy. Items 1–3 are latent production incidents; 4–5 protect the cost model and the flagship use case; 6–10 harden the new distributed layer and carry forward the still-open floor.
+| # | Third-pass finding | Status | Verification notes |
+|---|---|---|---|
+| 1 | Silent standalone fallback at 2+ replicas (split-brain) | ✅ **Fixed** | `REQUIRE_HA=true` (set in the Bicep) makes partial/missing HA config a hard startup failure with a precise error message; strict boolean parsing; covered by `clusterFactory` tests. |
+| 2 | `EXPIRE`/`PEXPIRE` whole-entry replication clobbering peers | ✅ **Fixed** | New `ttl` event kind + `Store.applyReplicatedTtl` + Cosmos patch of `/entry/expiresAtMs` and native `ttl` only. Docs updated with the exact race this closes. |
+| 3 | Expired docs never deleted from Cosmos; unbounded hydration | ✅ **Fixed** | Per-document native `ttl` derived from `expiresAtMs` on every upsert; hydration query filters expired docs server-side; coordinator re-checks client-side; hydration is now also **bounded by `maxMemoryBytes`** (partial load + loud `cluster.hydration_truncated` warning instead of an OOM restart loop). |
+| 4 | Uncoalesced per-key replication writes | ✅ **Fixed** (with headroom) | Per-key FIFO with coalescing classes: consecutive `whole` writes collapse to the latest, as do `ttl` and `incr`; classes never reorder across each other. A burst of N `INCR`s ≈ 1 in-flight + 1 coalesced write. **Headroom:** `field` events never coalesce — see new Top 10 #4. |
+| 5 | `INCR` last-write-wins undercounting | ✅ **Fixed — better than asked** | Full G-counter: per-origin cumulative contributions, merged by max on peers and in Cosmos (per-origin patch), seed origin for `SET`-created bases, safe-integer rollback, counter-vs-plain-string merge semantics documented (`SET` deliberately resets). Reordered/duplicated/delayed delivery provably can't drift the sum — and the adversarial suite tests exactly that. |
+| 6 | Silent replication death / no anti-entropy | ✅ **Fixed** | Transport counts consecutive receive errors (10 → fatal), detects entity-gone immediately, and signals `onFatalReplicationError` → bounded shutdown → restart re-creates the subscription and re-hydrates. Plus periodic anti-entropy (`ANTI_ENTROPY_INTERVAL_MS`, default = the 5-min message TTL) re-loads durable keys changed since the last watermark. |
+| 7 | Broad-privilege connection strings | ✅ **Fixed** | Managed identity (DefaultAzureCredential) for both Service Bus (`SERVICE_BUS_FULLY_QUALIFIED_NAMESPACE`) and Cosmos; Bicep drops both secrets entirely and pins `AZURE_CLIENT_ID`; connection strings remain only as a local/dev fallback. `docs/security.md` updated with the trust-boundary expansion. |
+| 8 | O(keyspace)/O(entry) hot paths | ✅ **Mostly fixed** | Heartbeat now reads O(1) `keyCounts()`; the metrics gauge reads O(1) `memoryBytesEstimate()`. **Remaining:** the O(entry-size) accounting recompute on hash/zset writes, and `src/index.ts:52` still binds the telemetry key-count source to `store.stats()` (a full walk per scrape) instead of the new O(1) `keyCounts()`. |
+| 9 | Untested consistency claims | ✅ **Fixed** | `fakeCluster` gained delay/reorder/drop/duplicate modes; `adversarialReplication.test.ts` exercises the documented invariants including G-counter convergence under hostile delivery. |
+| 10 | Carried operational floor | ✅ **Largely fixed** | `AUTH` throttling (`MAX_FAILED_AUTH_ATTEMPTS`, default 5, tested); `npm audit` CI job (non-blocking with a documented reason); base image pinned to a patch tag with a digest-pinning path documented; hard shutdown timer (`SHUTDOWN_HARD_LIMIT_MS`, 10 s) covering `cluster.stop()`'s network calls. **Still open:** slow-command log, admin-port reachability runbook, load-test-derived sizing. |
+
+**Net effect:** the third pass's five pre-production defects are all closed, with test coverage, and two of the fixes (G-counter, anti-entropy) came back stronger than the recommendation. The architecture is now in genuinely deployable shape. What remains is the subject of this pass: **running it cheaply.**
+
+---
+
+## Top 10 Changes to Make Today (Fourth Pass — Cost-Focused)
+
+Cosmos RU consumption is the dominant marginal cost of this architecture; Service Bus operations and replica compute are secondary. These are ordered by expected $ saved per hour of effort. Items 1–4 attack RU directly; 5–6 make cost measurable and buyable correctly; 7–9 trim steady-state overhead; 10 closes the loop.
 
 | # | Change | Why | Where |
 |---|--------|-----|-------|
-| 1 | **Fail fast in production when HA config is partial or missing — never silently run standalone at 2+ replicas.** The factory logs a warning and falls back to standalone on partial config, and absent config is silently standalone by design. But the Bicep now pins `minReplicas: 2`: a typo'd env var or missed secret yields **two or more independent, non-replicating nodes behind one connection-spraying load balancer** — per-connection divergent keyspaces, the exact correctness failure the old single-replica invariant existed to prevent, with only a warn-level log to notice. Add a `REQUIRE_HA=true` env (set in the Bicep) that makes standalone fallback a startup failure. | Split-brain-by-misconfiguration is the worst latent failure in the system today | `src/cluster/factory.ts`, `src/config.ts`, `infra/backendcache.bicep` |
-| 2 | **Replicate `EXPIRE`/`PEXPIRE` as TTL-only events, not whole-entry upserts.** They're registered under the whole-key path, so an `EXPIRE` on a hash/zset snapshots this node's *entire entry* and `applyReplicatedUpsert` overwrites the whole key on every peer — destroying concurrently-written fields the origin node hasn't received yet. This breaks the field-granularity guarantee the design carefully builds for `HSET`/`ZADD` (and re-ships potentially large entries for a metadata change). Add a `ttl` event kind + a Cosmos patch on `/entry/expiresAtMs`. | The `INCR` + `EXPIRE` rate-limit idiom makes this race common on the busiest keys | `src/commands/dispatcher.ts`, `src/cluster/clusterCoordinator.ts`, `src/cluster/cosmosDurableStore.ts`, `src/store/store.ts` |
-| 3 | **Enable Cosmos native document TTL and exclude expired docs from hydration.** Local lazy/sweep expiry calls `remove()` without replication (correctly — every node expires independently), so **expired documents are never deleted from Cosmos**. The keys container grows monotonically; `loadAll()` (`SELECT c.key, c.entry FROM c`, no expiry filter) re-loads every dead key on each restart; hydration gets slower forever and — since `applyReplicatedUpsert` bypasses the memory ceiling — eventually becomes a poison pill that OOMs every restarting node. Write a `ttl` property (seconds, from `expiresAtMs`) on upsert, enable TTL on the container, and add a `WHERE` clause to the hydration query. Log and bound hydration against `maxMemoryBytes`. | Unbounded storage growth + ever-slower startup + an eventual restart-loop OOM | `src/cluster/cosmosDurableStore.ts`, `src/cluster/clusterCoordinator.ts` |
-| 4 | **Coalesce per-key replication writes, then run the RU math.** `enqueueForKey` correctly *serializes* same-key publishes but never *collapses* them: N rapid `INCR`s on a hot counter = N sequential Cosmos upserts + N Service Bus messages, each shipping an absolute value that supersedes the previous one. Replace queued-but-not-started tasks for the same key with the latest state (a one-slot pending map) — a large RU/ops reduction on exactly the hot-key workloads this system serves. Then price the result honestly: at ~100 mutating commands/s, per-write persistence is roughly 1,000 RU/s ≈ 86 M RU/day — hundreds of dollars/month serverless, an order of magnitude above the original "avoid a $16/month managed Redis" thesis. If the math doesn't close, consider not durably persisting short-TTL keys at all (Service-Bus-only replication; sub-minute counters reset on full-cluster restart anyway). | The cost thesis inverted; coalescing is today's code fix, the RU model is today's decision input | `src/cluster/clusterCoordinator.ts`, then `docs/high-availability.md` |
-| 5 | **Replicate `INCR` as a delta, not an absolute value.** Cross-node concurrent `INCR`s currently converge last-write-wins — the counter *undercounts* precisely under the load spikes rate limiting exists for (fail-open during attack). Increments commute: ship `{kind:'increment', key, delta}` events (peers add the delta) and use Cosmos's atomic `incr` patch op for the durable value. This makes the flagship use case (shared counters) converge correctly with no consensus machinery — a G-counter in all but name. | Fixes the one consistency race that undermines the system's primary purpose | `src/cluster/`, `src/commands/dispatcher.ts`, `src/store/store.ts` |
-| 6 | **Detect and recover replication-subscription death.** Receivers use `receiveAndDelete` with per-node subscriptions created at startup, `autoDeleteOnIdle: PT1H`, message TTL `PT5M`, and a `processError` handler that only logs. Failure chain: a quiet or partitioned node can lose its subscription (verify whether an idle-but-connected receiver resets the PT1H clock — Azure's idle semantics are notoriously subtle) or miss >5 min of messages, after which it **diverges silently forever** — there is no anti-entropy, no resubscribe, no self-check. Treat sustained receive errors / subscription-not-found as fatal (exit; the restart re-creates the subscription and re-hydrates), and add periodic incremental re-hydration (`WHERE c.updatedAtMs > @lastSync`) as a cheap convergence backstop. | "Replication quietly stopped" is undetectable today except by comparing nodes by hand | `src/cluster/serviceBusTransport.ts`, `src/cluster/clusterCoordinator.ts` |
-| 7 | **Move to managed identity and least privilege for both Azure dependencies.** The Bicep wires connection strings: Service Bus with **Manage** rights (namespace-level create/delete of topics and subscriptions) and a Cosmos account key (full account access). The Cosmos code already supports AAD (`COSMOS_ENDPOINT` + `DefaultAzureCredential`); use it, add the same for Service Bus (Data Owner scoped to the one topic), and drop both secrets. Note the topic is now **part of the data plane's trust boundary**: any principal with Send rights can inject upsert/delete/publish events into every node's memory — document that and scope Send accordingly. | The HA layer regressed the security posture from "two narrow secrets" to "two broad ones" | `infra/backendcache.bicep`, `src/cluster/serviceBusTransport.ts`, `docs/security.md` |
-| 8 | **Fix the O(keyspace)/O(entry) hot paths HA just multiplied.** The heartbeat calls `store.stats()` (full walk) every 10 s, the metrics gauge does the same per scrape, and the O(entry-size) accounting recompute now also runs on every replicated apply — a busy peer taxes every node's event loop. Expose the store's exact `memoryBytes` counter for the gauge/heartbeat and make accounting deltas incremental (second-pass items 2–3, now urgent). | Background overhead now scales with cluster write volume, not just local traffic | `src/store/store.ts`, `src/telemetry/saturation.ts`, `src/cluster/clusterCoordinator.ts` |
-| 9 | **Test the consistency model you documented.** The HA docs make precise claims (no-op commands never replicate; mid-hydration events buffer and win over the snapshot; concurrent different-field writes both survive; same-key same-node writes stay ordered). The fake transport delivers synchronously and in order — add reorder/delay/drop/duplicate modes and turn each documented claim (plus the finding-2 `EXPIRE`-vs-`HSET` race, once fixed) into a test. Distributed invariants without adversarial tests decay into folklore. | The correctness surface moved from one process to a protocol; the tests must follow | `test/helpers/fakeCluster.ts`, `test/unit/`, `test/integration/` |
-| 10 | **Carry forward the open operational floor.** Still outstanding from prior passes and unchanged in priority: failed-`AUTH` throttling; digest-pinned base image + `npm audit`/image scan in CI; a hard exit-timer on crash-path shutdown (now also covering `cluster.stop()`'s network calls); admin-port reachability + incident runbook (now including `/admin/nodes` and "how to tell whether replication is flowing"); the memory-ceiling existing-key-growth gap. | The single-node floor didn't get less necessary because a cluster now stands on it | various (see second-pass table) |
+| 1 | **Set a custom indexing policy on the `keys` container.** Cosmos's default policy indexes *every path in every document* — every field name of every presence hash, every member of every sliding-window zset, every counter origin. Write RU scales with indexed paths, so hash/zset patches and upserts pay to index data that is never queried. The only paths queries touch are `/key`, `/updatedAtMs`, and `/entry/expiresAtMs`. Exclude `/*`, include those three. Typically a **2–5× write-RU reduction** on container-typed entries; zero code changes; applies immediately to new writes. | The single biggest RU lever available, and it's pure infra config | Cosmos container config; document in `infra/backendcache.bicep` + `docs/deployment.md` |
+| 2 | **Make short-TTL keys Service-Bus-only (`DURABILITY_MIN_TTL_MS`).** The highest-write-rate keys — fixed-window rate-limit counters, sliding-window zsets — live seconds to a minute and would expire before a restart could care about them. At publish time, skip the durable write for any key whose remaining TTL is under a threshold (default e.g. 60 s): peers still converge via Service Bus (they don't read Cosmos for live replication), hydration/anti-entropy simply won't see keys that would be dead anyway. Trade-off: a *full-cluster* restart loses sub-threshold keys — which was the accepted contract for **all** data until this month. This removes the dominant RU source outright rather than optimizing it. | Rate-limit churn is most of the write volume and the least durability-worthy | `src/cluster/clusterCoordinator.ts`, `src/config.ts`, `docs/high-availability.md` |
+| 3 | **Decouple the Cosmos cadence from the Service Bus cadence.** Peers need SB events at full speed (they drive convergence); the durable store's only consumers are restarts and anti-entropy, which tolerate bounded staleness. Add a per-key minimum interval between durable writes (`DURABLE_WRITE_MIN_INTERVAL_MS`, e.g. 1000 ms) for the `whole`/`incr` coalescing classes: the queue mechanics already exist, this adds a time gate, so a hot counter costs ~1 RU-write/second instead of one per round-trip-latency. SB broadcasts stay per-coalesced-batch. | Coalescing bounded writes by *latency*; this bounds them by *policy* | `src/cluster/clusterCoordinator.ts`, `src/config.ts` |
+| 4 | **Extend coalescing to `field`-class events.** Consecutive queued `HSET`/`HDEL` (and `ZADD`/`ZREMRANGEBYSCORE`) tasks for the same key currently never merge, but they compose cleanly: later set-value per field wins, sets and deletes fold into one net patch + one event. High-churn presence hashes (the same `user:<id>` field flapping online/offline) currently pay one Cosmos patch + one SB message per flap. | Same win #4 in the third pass delivered for counters, now for presence | `src/cluster/clusterCoordinator.ts` (`ReplicationTask` merge for `'field'`) |
+| 5 | **Meter what you spend: capture Cosmos `requestCharge` and SB operation counts.** Every Cosmos SDK response carries the RU charge of that call; today it's discarded (the structural interfaces don't expose it — add one field). Emit `backendcache.cosmos.request_units` (counter, dimensioned by operation: upsert/patch/query/delete) plus an SB publish counter, replication-queue depth gauge, and replication-lag histogram. This turns the capacity-mode decision (#6) and the thresholds in #2/#3 into arithmetic on a week of real data instead of guesses. | You can't optimize — or budget — what you don't measure | `src/cluster/cosmosDurableStore.ts`, `src/telemetry/` |
+| 6 | **Choose the Cosmos capacity mode from #5's data and set a spend alarm.** Rule of thumb: serverless wins at low/bursty sustained RU; autoscale provisioned throughput wins once sustained average RU/s clears a few hundred (autoscale bills for the high-water decile, serverless per request). After one representative week: pick, document the reasoning in `docs/deployment.md`, and add an alert on RU consumption slope so a keyspace or traffic regression shows up as a cost signal, not a bill. | The same workload can differ several-fold in bill purely by capacity mode | Cosmos account config, `docs/deployment.md`, alert rules |
+| 7 | **Trim the heartbeat document and TTL the `nodes` container.** Each node upserts its full pub/sub topology (every channel and pattern name) every 10 s — document size, and therefore RU, grows with Socket.IO room count, and it's re-paid 6×/minute/node forever. Cap it (counts + top-N channels), and set a native `ttl` (~2× `NODE_STALE_MS`) on node snapshots so a crashed node's document self-cleans instead of lingering (graceful `deleteNodeSnapshot` doesn't run on a crash). | Steady-state background RU that scales with rooms × nodes × uptime | `src/cluster/clusterCoordinator.ts` (`heartbeat()`), `src/cluster/cosmosDurableStore.ts` |
+| 8 | **Anchor anti-entropy on Cosmos `_ts` instead of client `updatedAtMs`.** The watermark currently mixes writer clocks (each node stamps `updatedAtMs` locally) with the reconciling node's own clock for the initial value — cross-node skew can make a pass miss writes landed by a slow-clocked peer. Cosmos assigns `_ts` (server epoch-seconds) on every write, it's always index-covered, and it's free. Query `WHERE c._ts > @since` and carry the max `_ts` as the watermark. Also skip #2's persistence-exempt keys in the reconcile query once that lands. | Removes a subtle correctness hole in the backstop *and* keeps the query cheap | `src/cluster/cosmosDurableStore.ts` (`loadChangedSince`), `src/cluster/clusterCoordinator.ts` |
+| 9 | **Counter-origin hygiene + the last O(n) telemetry walk.** Container Apps replica names change every revision, so a long-lived counter accrues one dead origin entry per deploy generation (in memory, in every event, and in its Cosmos doc). TTL'd counters don't care; for persistent counters, compact origins absent from the live-node set into the seed during hydration (safe: a gone node's contribution is final). And swap `src/index.ts:52`'s `bindKeyCountsSource(() => store.stats())` to the O(1) `keyCounts()` — the walk it does per metric scrape is exactly what PR #10 built the counters to avoid. | Bounds per-counter growth across deploys; finishes the O(1) observability work | `src/store/store.ts`, `src/cluster/clusterCoordinator.ts`, `src/index.ts:52` |
+| 10 | **Load-test with the meters on, then right-size everything.** With #5 in place, run a representative Socket.IO + rate-limit load and derive: RU per command class (validates #1–#4's savings), replication lag under burst, node CPU/memory headroom (informs whether the O(entry) accounting recompute — still open — actually matters at your entry sizes), replica count/size, and the numeric defaults for `DURABILITY_MIN_TTL_MS` / `DURABLE_WRITE_MIN_INTERVAL_MS`. Publish the measured envelope + a cost model table in `docs/deployment.md`. | Converts every guessed number in this architecture into a measured one | load harness, `docs/deployment.md` |
+
+Also carried (non-cost): slow-command log, admin-port reachability runbook — unchanged from prior passes, still worth an afternoon.
 
 Everything below is the full re-assessed analysis.
 
@@ -52,192 +54,158 @@ Everything below is the full re-assessed analysis.
 <a name="system-overview"></a>
 ## System Overview
 
-**Core business purpose.** Unchanged in function — a drop-in RESP2-compatible cache/pub-sub service for cross-replica rate limiting, presence, Socket.IO fan-out, and abuse guards — but **changed in promise**: state now survives node restarts, redeploys, and scale events. The system has moved from "ephemeral by contract" to "durable, eventually consistent by contract."
+**Core business purpose.** A drop-in RESP2-compatible cache/pub-sub service for cross-replica rate limiting, presence, Socket.IO fan-out, and abuse guards — now durable and highly available across 2+ replicas via Service Bus replication and Cosmos DB persistence. **The architecture is committed**: managed Redis failed 20+ deployment attempts in this Azure environment and is off the table. The engineering question is execution quality and run-cost, both of which this pass finds in good and improving shape.
 
-**The strategic question this pivot raises (stated plainly).** The original raison d'être was *"no external managed service required."* The HA design requires **two** managed Azure services (Cosmos DB + Service Bus), at least two replicas, and ~1,500 lines of bespoke replication code — while offering *weaker* consistency than a single managed Redis (last-write-wins races on counters vs. Redis's atomic `INCR`). There may be sound organizational reasons to prefer this shape (Cosmos/Service Bus already provisioned and governed, Redis procurement blocked, a hard durability requirement). But the decision should be made with the cost model of Top 10 #4 and this consistency comparison on the table — not inherited from momentum. The repo's own earlier architecture doc ("don't pre-build HA speculatively; revisit only if availability becomes a *measured* problem") sets the standard the pivot should be held to: if there is a measured availability problem, document it in `docs/high-availability.md`; if not, this is the speculative build the docs warned against, executed well.
+**System boundaries and interfaces:** unchanged from the third pass (RESP `:6379`, `/healthz` + `/readyz`, cluster-aware `/admin/*`, Service Bus topic, Cosmos `keys`/`nodes` containers, OTLP egress) — except the Azure dependencies now authenticate via **managed identity** with no stored secrets, which also simplifies the interface inventory: two Key Vault secrets total (RESP password, admin token).
 
-**System boundaries and interfaces:**
-1. **RESP TCP `:6379`** — data plane, per-node; ingress load-balances connections across replicas with no affinity (per-TCP-connection stickiness only).
-2. **HTTP `:8081` `/healthz` + `/readyz`** — liveness vs. readiness now correctly split; readiness gates on hydration.
-3. **HTTP `:8082` `/admin/*`** — now cluster-aware: `/admin/stats` and `/admin/pubsub` merge peer heartbeat snapshots; new `/admin/nodes` lists membership; admin `DELETE` correctly replicates cluster-wide.
-4. **Azure Service Bus topic** (new) — replication fan-out: one shared topic, one auto-created subscription per node. **Now inside the data-plane trust boundary.**
-5. **Cosmos DB** (new) — `keys` container as durable source of truth (hydration source), `nodes` container for heartbeats/topology.
-6. **OTLP / Azure Monitor egress** — unchanged.
+**What changed in the replication design since the third pass (all verified):**
+- **Event taxonomy is now complete and shape-correct:** whole-key (`SET`/`DEL`), cumulative-contribution (`INCR`, G-counter), field/member deltas (`HSET`/`HDEL`/`ZADD`/`ZREMRANGEBYSCORE`), TTL-only (`EXPIRE`/`PEXPIRE`), and ephemeral (`PUBLISH`). Each shape replicates the minimum superseding fact, which is both the correctness fix and the cost foundation.
+- **Coalescing classes** collapse redundant queued writes per key without reordering across classes.
+- **Convergence is defended in depth:** live events (fast path) → anti-entropy re-hydration every 5 min (backstop for missed events) → fatal-error restart (backstop for a dead receiver) → bounded hydration (backstop for an oversized keyspace).
+- **The G-counter is the standout:** per-origin cumulative totals merged by max are commutative and idempotent, so the flagship use case (shared rate-limit counters) now *cannot* undercount from reordered, duplicated, or delayed delivery — verified by adversarial tests. `SET`-resets and seed-origin promotion are handled and documented.
 
-**Major components** (new/changed):
-- `ClusterCoordinator` (`src/cluster/clusterCoordinator.ts`) — hydration (with correct event buffering during snapshot load), fire-and-forget replication with per-key ordering chains and shutdown drain, heartbeats.
-- `CosmosDurableStore` — upserts/deletes plus field/member-granular Patch-API writes (JSON-Pointer-escaped, batched at Cosmos's 10-op limit, with a first-batch-404 document-creation fallback); base64url doc ids for Redis-hostile key names.
-- `ServiceBusReplicationTransport` — topic/subscription lifecycle, `receiveAndDelete`, origin-node filtering.
-- `dispatch` — replication centralized in the dispatcher via per-command `mutatedKeys`/`fieldReplication` declarations (handlers stay HA-unaware); no-op detection prevents phantom deletes; `HDEL`/`ZREMRANGEBYSCORE` capture before-state to replicate only members that actually existed.
-- `Store` — `applyReplicated*` methods that never cascade replication and deliberately bypass admission control.
-- Standalone mode: null implementations keep single-node behavior bit-identical and the test suite hermetic.
-
-**Data flow (HA mode).** Client write → local synchronous mutation → RESP reply (fast path unchanged) → async: Cosmos upsert/patch ∥ Service Bus publish → each peer applies to its in-memory copy. Reads are always local. `PUBLISH` fans out locally then broadcasts for peers' local subscribers; never persisted (correctly matching Redis pub/sub semantics).
-
-**Key architectural decisions and drivers:**
+**Key architectural decisions and drivers** (delta view):
 
 | Decision | Driver | Assessment |
 |---|---|---|
-| Multi-master, eventually consistent, no consensus | Simplicity; any node serves any client; LB has no affinity | Coherent and honestly documented; the residual races that matter are findings #2/#5, and the counter race hits the flagship use case |
-| Every node holds the full keyspace | Local-read latency; no routing layer | Sound at target scale; caps cluster capacity at one node's memory — growth path is still namespace sharding, now per-cluster |
-| Replication centralized in dispatcher via declarative specs | A new mutating command can't silently skip replication | Genuinely good design — the kind of "make the wrong thing unwritable" structure worth propagating |
-| Field/member-granular replication, never downgraded to whole-key delete | Concurrent different-field writes must both survive | Correct and subtle — undermined only by the EXPIRE whole-entry path (finding #2) |
-| Fire-and-forget replication, drain on shutdown | Client latency must not pay for Cosmos/Service Bus round trips | Right trade for a cache; needs coalescing (#4) and divergence detection (#6) to be complete |
-| Fail-fast bounded startup; `/readyz` gates on hydration | A never-ready zombie is worse than a crash loop | Correct, well-reasoned, correctly wired to probes |
-| Standalone fallback on partial config | "Fall back to well-understood behavior" | **Wrong default at `minReplicas: 2`** — see Top 10 #1; right instinct, wrong failure mode |
+| Commit to Cosmos+Service Bus HA; reject managed Redis | 20+ failed Redis deployments in this environment | Decision made with operational evidence; record it in-repo (see decision-record note above) |
+| Per-shape replication events with coalescing classes | Correctness first, cost second | Right structure; its natural completion is items #2–#4 above |
+| G-counter for `INCR` | Rate limiting must not fail open under contention | Correct CRDT choice; conflict-free where it matters, LWW where that's honest |
+| Anti-entropy defaulted to the SB message TTL | A partition longer than message retention must self-heal | Right coupling of the two constants; move to `_ts` (#8) |
+| Managed identity everywhere | Blast-radius reduction | Done properly, including `AZURE_CLIENT_ID` pinning |
+| `REQUIRE_HA` in the multi-replica deployment | Split-brain must be impossible by construction | The invariant is back — enforced by config instead of replica count |
 
 ---
 
 <a name="architectural-patterns"></a>
 ## Architectural Patterns
 
-**Patterns identified (new in this pass):**
-- **Multi-master replication with per-key origin serialization** — each node applies writes locally then broadcasts; per-key promise chains serialize same-node same-key publishes. No global ordering (events carry a `seq` that nothing consumes — either use it for LWW tie-breaking/dedup or drop it).
-- **Read-local / write-through-async** — the in-memory store is a full hot replica; Cosmos is the cold source of truth touched only on writes and hydration.
-- **Snapshot + buffered-replay hydration** — live events buffer during snapshot load and replay after, so mid-hydration writes beat the older snapshot. Textbook-correct and rare to see done right.
-- **Heartbeat-based membership with staleness eviction** — `nodes` container + 30 s staleness window; view-only (nothing routes on membership), which keeps it low-risk.
-- **Declarative side-effect registration** — `mutatedKeys`/`fieldReplication` on the command table; the dispatcher owns replication so handlers can't forget it.
-- **Structural typing over optional SDKs** — local minimal interfaces for the Cosmos/Service Bus SDK surfaces, keeping them `optionalDependencies` without type casts; consistent with the OTel approach.
+**New/matured patterns this pass:**
+- **CRDT-style convergent counter (G-counter)** — per-origin monotone totals, max-merge, seed origin for LWW interop with `SET`. Textbook, correctly scoped to the one command whose semantics are additive.
+- **Coalescing write-behind queue** — per-key FIFO with supersession classes; the standard pattern for fan-in replication cost control, implemented with correct ordering guarantees.
+- **Anti-entropy reconciliation** — watermark-based incremental re-sync; the missing half of every gossip/fan-out design, now present. (Watermark source should move to server time — #8.)
+- **Fail-fast invariant enforcement** — `REQUIRE_HA` converts an operational assumption into a startup precondition. This, plus the earlier "declarative replication registry," shows a healthy pattern habit: making wrong states unrepresentable rather than documented-against.
+- **Adversarial test doubles** — the fake transport's delay/reorder/drop/duplicate modes turn documented consistency claims into executable properties. This is the practice that keeps a bespoke replication protocol ownable long-term.
 
-**Pattern effectiveness:**
-- The **no-op-never-replicates** rule (checking key existence before *and* after) closing the phantom-delete hazard, and the **never-downgrade-to-whole-key-delete** rule for emptied hashes/zsets, are exactly the two subtleties naive implementations get wrong. Their presence — with explanatory comments — is strong evidence of design care.
-- The **consistency documentation** in `docs/high-availability.md` is unusually honest about what's traded away, including the correct observation that no `EXISTS`/`TYPE` exposure makes empty-entry lingering client-invisible.
-- **Pattern conflict (the one that matters):** whole-entry replication (`EXPIRE`/`PEXPIRE`, and any future command routed via `mutatedKeys` against hashes/zsets) conflicts with field-granular replication on the same keys — the absolute upsert clobbers what the granular path carefully preserved (Top 10 #2). The two replication grains need a rule: *container-typed entries never replicate whole-entry except on delete.*
-- **Missing pattern:** anti-entropy. Every eventually-consistent multi-master system needs a convergence backstop for missed events; this one has none (Top 10 #6). Fire-and-forget + at-most-once delivery + 5-minute message TTL without repair means divergence is permanent until overwrite.
-- **Alternative not taken:** delta/CRDT-style events for counters (Top 10 #5) — commutative increments would fix the flagship race cheaply; the current absolute-value events are the simplest correct-ish choice for everything else.
+**Pattern effectiveness:** no conflicts found this pass. The one structural gap is that the coalescing pattern stops short of the `field` class (#4) and has no time dimension (#3) — both are natural extensions of machinery that already exists, not new designs.
 
-**Technical debt implications:** the HA layer *is* the new debt — high-quality, but ~1,500 lines of the most expensive kind of code to own (distributed, failure-mode-driven, Azure-semantics-coupled). The declarative structure and null-object standalone mode contain it well. The debt is priced acceptably **only if** the premise question (System Overview) resolves in HA's favor.
+**Technical debt:** the third pass called the HA layer "well-built debt whose premise needed validating." The premise is now validated by operational reality (Redis unde­ployable here), and the layer gained the two things that most reduce its carrying cost: adversarial tests and honest failure-mode docs. Remaining debt is small and enumerated: O(entry) accounting recompute, `index.ts:52` stats walk, field-coalescing, the runbook.
 
 ---
 
 <a name="scalability"></a>
 ## Scalability Analysis
 
-**Horizontal scaling assessment (3/5 — was 1/5 by design):**
-- *Stateless vs stateful:* every node is a full stateful replica; any node serves any client; scale-out is real (Bicep: `minReplicas: 2`, `maxReplicas: 5`, TCP-connection-based autoscale rule at 200 concurrent connections — a sensible scale driver for a RESP service).
-- *Limits:* capacity ceiling = one node's memory (full copy per node) and write fan-out cost scales with N (every write → N−1 deliveries + shared Cosmos write). Read throughput scales linearly; write throughput does not. This is the right shape for a read-heavy cache and an acceptable one for the target workload — but worth stating in the docs.
-- *Data partitioning:* none (each node = full keyspace). Growth path remains namespace sharding (a second independent cluster per use case), unchanged.
-- *Load balancing / discovery:* Container Apps TCP ingress, per-connection; heartbeat membership is observability-only. Adequate.
-- *New scaling hazard:* hydration time grows with keyspace (and today, with all-time expired-key accumulation — Top 10 #3), directly extending scale-out latency: a new replica can't take traffic until `loadAll()` completes.
+**Horizontal scaling assessment (3/5, unchanged):** 2–5 replicas, connection-based autoscale, every node a full copy. Ceiling remains one node's memory; write cost scales with N (each write → N−1 SB deliveries + shared Cosmos writes). Fine for the target workload; the growth path remains namespace sharding into a second independent cluster. Hydration now filters expired docs and is memory-bounded, so scale-out latency is bounded by *live* keyspace size — a real improvement to elasticity.
 
-**Vertical scaling assessment (3/5):**
-- *Bottlenecks (re-ranked):*
-  1. **Replication overhead per write** — one Cosmos round trip + one Service Bus publish per mutating command (uncoalesced), plus apply cost on every peer. This is now the dominant per-write cost and the dominant *cost* cost (Top 10 #4).
-  2. **O(keyspace) walks** — TTL sweep (5 s), metrics gauge (per scrape), and now heartbeat (10 s) — three independent full walks (Top 10 #8).
-  3. **O(entry) accounting recompute** — on local *and* replicated hash/zset writes (Top 10 #8).
-  4. **`PUBLISH` fan-out** — unchanged locally; cross-node adds one broadcast per publish (cheap) but total delivered messages scale with cluster-wide subscribers.
-  5. Parser/backpressure paths — bounded since pass two; no longer material.
-- *Memory:* unchanged (latin1 2× tax; `Buffer` refactor still the best capacity lever) — but now multiplied by N replicas, and hydration bypasses the ceiling (Top 10 #3).
+**Vertical scaling assessment (4/5, up from 3/5):**
+- Fixed since last pass: heartbeat and metrics no longer walk the keyspace; hydration no longer loads dead keys.
+- Remaining, in order: (1) replication RU/ops per write — now the cost story more than the performance one (Top 10 #1–#4); (2) O(entry-size) accounting recompute on hash/zset mutations, local and replicated — measure at your real entry sizes in #10 before deciding it matters; (3) `PUBLISH` fan-out — unchanged, still the eventual local ceiling; (4) `index.ts:52` per-scrape stats walk (#9).
+- New observability need: replication-queue depth and lag (part of #5) — the queue is the new place where pressure accumulates invisibly.
 
-**System bottlenecks — current → future:** the leading indicators are now *replication lag* and *Cosmos RU consumption*, and neither is measured. Add: replication publish latency histogram, in-flight replication gauge (`inFlight.size`), events-applied counter per node, and hydration duration/key-count (logged today, worth a metric). Without a lag signal, the eventual-consistency window is unobservable in production.
+**Bottleneck trajectory:** with the fixes in, the first production wall is most likely **Cosmos RU spend, not node performance** — which is exactly why this pass's Top 10 is a cost list.
 
 ---
 
 <a name="reliability"></a>
 ## Reliability Review
 
-**Fault tolerance assessment (3/5 — single-node loss is now survivable, but new distributed failure modes arrived):**
+**Fault tolerance assessment (4/5, up from 3/5):**
 
 | Failure | Behavior now | Assessment |
 |---|---|---|
-| Node restart / redeploy / scale-in | Peers keep serving; restarted node hydrates before taking traffic; clients reconnect | ✅ The headline win — genuinely delivered, with correct probe wiring |
-| Full-cluster restart | State restored from Cosmos | ✅ New capability (was: total loss) |
-| Cosmos down at startup | Fail-fast within `CLUSTER_STARTUP_TIMEOUT_MS` (30 s) → crash-loop with backoff | ✅ Correct choice, well-argued in docs |
-| Cosmos/Service Bus down at runtime | Writes still succeed locally; replication fails with warn logs; cluster diverges | ⚠️ Acceptable *if bounded* — but there's no recovery path (Top 10 #6) |
-| Node misses replication events (>5 min partition, subscription deleted, sustained receive errors) | Silent, permanent divergence until each key is next written | ❌ The biggest reliability gap (Top 10 #6) |
-| Partial/missing HA config at 2+ replicas | Warn log, then N independent standalone nodes behind one LB | ❌ Split-brain by misconfiguration (Top 10 #1) |
-| Concurrent cross-node writes, same key/field | Last-write-wins; counters undercount under contention | ⚠️ Documented; fixable for counters (Top 10 #5) |
-| `EXPIRE` racing field writes | Whole-entry upsert reverts peers' unreplicated fields | ❌ Undocumented correctness bug (Top 10 #2) |
-| Oversized Cosmos keyspace | Hydration bypasses memory ceiling → restart-loop OOM potential | ⚠️ Time bomb via expired-doc accumulation (Top 10 #3) |
+| Node restart / redeploy / scale event | Peers serve; node re-hydrates (expired-filtered, memory-bounded) before readiness | ✅ |
+| Full-cluster restart | State restored from Cosmos (minus native-TTL-evicted dead keys — correct) | ✅ |
+| Missed replication events (partition, blip) | Anti-entropy pass repairs within ~5 min | ✅ Was the biggest gap; closed |
+| Dead subscription / sustained receive errors | Fatal signal → bounded shutdown (10 s hard limit) → restart recreates + rehydrates | ✅ Closed |
+| Partial/missing HA config | Hard startup failure under `REQUIRE_HA` (set in Bicep) | ✅ Closed |
+| Cross-node concurrent `INCR` | Converges on the true sum (G-counter), adversarially tested | ✅ Closed — flagship use case now conflict-free |
+| `EXPIRE` racing field writes | TTL-only event; cannot clobber | ✅ Closed |
+| Oversized durable keyspace | Partial hydration + loud warning instead of OOM crash-loop | ✅ Closed (monitor the warning) |
+| Remaining LWW races (`SET` vs `INCR`, same-field `HSET`) | Documented, honest, appropriate to a cache | ⚠️ Accepted by design |
 
-- *Graceful shutdown:* drain of in-flight replication (bounded 2 s) before deregistering — thoughtful, including the heartbeat-resurrection edge case the comment calls out. The crash path (`uncaughtException` → full drain including `cluster.stop()`'s network calls) still has no hard exit timer (Top 10 #10).
-- *Degradation strategy:* local-first writes mean the data plane degrades gracefully when Azure dependencies fail — correct for a cache. What's missing is *knowing* it happened: replication failures are warn logs with no counter, no lag metric, no alert surface.
+**Disaster recovery (4/5, unchanged):** RPO ≈ replication latency for persisted keys; note that adopting Top 10 #2 (persistence-exempt short-TTL keys) *deliberately* trades RPO on sub-minute keys for RU — the right trade, worth stating in the HA doc when it lands. RTO = restart + bounded hydration.
 
-**Disaster recovery capability (4/5 — was 2/5):**
-- *RPO:* ≈ replication latency (sub-second typical) for anything persisted; whole-cluster loss recovers from Cosmos. A dramatic improvement — and past the point of what ephemeral data strictly needed, which is the premise question again.
-- *RTO:* restart + hydration + probe pass; bounded by keyspace size (and today by expired-doc bloat — Top 10 #3).
-- *Multi-region:* out of scope; Cosmos could carry it later if ever justified.
-- *Contract drift risk (elevated):* now that data *does* survive restarts, the temptation to store durable business state in a fluent-Redis-speaker is much stronger, while the consistency model (LWW, no atomicity) is still wrong for it. The docs' closing paragraph ("if a workload needs stronger guarantees, it has outgrown this") is exactly right — keep it prominent.
-
-**Reliability improvements:** Top 10 #1, #2, #3, #6 immediately; replication-lag observability (Scalability section); then the carried-forward floor (#10).
+**Remaining reliability work:** replication lag/queue metrics with alert rules (#5), the runbook (carried), and turning the `npm audit` job blocking once the transitive OTel advisory clears (the non-blocking rationale is documented in CI — good hygiene; set a reminder to revisit).
 
 ---
 
 <a name="security"></a>
 ## Security Assessment
 
-**Security measures evaluation:**
-- *Unchanged strengths:* pre-auth command gating, timing-safe comparisons, anti-exfiltration admin design, no scripting anywhere (the docs correctly note even the Cosmos layer uses no stored procedures), loud startup warnings on unset secrets, internal-only ingress.
-- *New surface — Service Bus:* connection string requires **Manage** rights (namespace-scoped), because nodes create/delete their own subscriptions. The replication topic is now effectively a write path into every node's memory: any principal that can Send can inject `upsert`/`delete`/`publish` events (no signing, no schema validation beyond field presence, `body as ReplicationEvent`). Within the intended trust boundary this is fine — but the boundary moved and `docs/security.md` hasn't fully caught up (Top 10 #7).
-- *New surface — Cosmos:* Bicep uses the account connection string (account-key = full account access) even though the code already supports AAD via `COSMOS_ENDPOINT` + `DefaultAzureCredential`. Use the path the code already built (Top 10 #7).
-- *Event validation:* `applyRemoteEvent` field-checks before applying and catches per-event errors — good — but a malformed entry snapshot (e.g. absurd sizes) is applied without bounds because replicated applies bypass admission control. Acceptable within the trust boundary; another reason to keep that boundary tight.
-
-**Vulnerability analysis (ranked):**
-1. Split-brain misconfiguration (Top 10 #1) — an availability/correctness failure with security-adjacent consequences (rate limits silently per-node ≈ fail-open).
-2. Broad-privilege connection strings for both new dependencies (Top 10 #7).
-3. Replication-topic injection surface — mitigated by network + RBAC scoping, worth documenting explicitly.
-4. Carried forward: `AUTH` brute-force at line speed; unpinned base image; no dependency advisory scanning — now weightier with three `@azure/*` SDK trees in the runtime image (~1,100 lockfile lines added).
-
-**Security recommendations:** Top 10 #1, #7, then the carried floor (#10). Update `docs/security.md` to add the Service Bus topic and Cosmos containers to the threat model — the current doc still describes a two-secret, single-process world.
+**Security posture (4/5, up from 3/5):**
+- **Managed identity for both Azure dependencies** — the two broad secrets (namespace-Manage SAS, Cosmos account key) are gone from the deployment entirely; RBAC scopes the identity to the topic and the Cosmos data plane; `AZURE_CLIENT_ID` pinning avoids multi-identity ambiguity. This was the pass's biggest security ask, delivered cleanly. Connection strings remain as a dev/local fallback, clearly labeled.
+- **`AUTH` brute-force throttling** — per-connection failed-attempt cap (default 5) forces a TCP reconnect per guess burst; tested.
+- **Supply chain** — base image pinned to a patch tag (digest path documented), `npm audit` in CI (non-blocking with a written, reviewable reason), lockfile-only installs.
+- **Trust boundary** — `docs/security.md` now covers the Service Bus topic and Cosmos containers as data-plane surfaces.
+- **Remaining:** replication events are still applied structurally unvalidated (schema-light `body as ReplicationEvent`) — acceptable inside the RBAC-scoped boundary, but a cheap zod-style shape check on `applyRemoteEvent` would harden against a compromised or buggy publisher; the audit job should eventually block; the admin runbook remains open.
 
 ---
 
 <a name="cost"></a>
 ## Cost Efficiency
 
-**Resource utilization assessment (2/5 — was 5/5; the thesis inverted):**
-- *Compute:* ≥2 replicas (0.25 vCPU / 0.5 Gi each) ≈ $20–30/month — fine.
-- *Service Bus:* topics require Standard tier ≈ $10/month base + per-operation charges; every mutation = 1 send + (N−1) receives.
-- *Cosmos DB — the dominant term:* every mutating command is a document write (~10 RU upsert; patches somewhat less). At a modest sustained 100 mutating commands/s: ~1,000 RU/s ≈ 86 M RU/day ≈ **hundreds of dollars/month** serverless, or a provisioned-throughput commitment sized to peak write rate. For comparison, the managed Redis this system was built to avoid: ~$16/month (Basic C0) to ~$100/month (Standard C1) — *with* atomic `INCR` and strong single-node consistency. Unless write rates are very low or the durability requirement is hard, **the HA design costs more than the thing it replaces while providing weaker consistency.** This must be measured against real traffic before production (Top 10 #4).
-- *Storage:* unbounded today (expired docs never deleted — Top 10 #3); native TTL makes it self-limiting and costs nothing.
-- *Operational overhead:* the largest new cost is unpriced — owning a bespoke replication protocol across two Azure services. The test fence (fakes, hermetic standalone mode) contains regression risk well, but Azure-side behavior (subscription idle semantics, RU throttling, partition behavior) is outside the fence entirely.
+**Reframing.** Prior passes scored cost partly against a managed-Redis baseline. That baseline is void here — 20+ failed deployments make it operationally unavailable, whatever its sticker price. Cost is therefore scored as: *how close is this implementation to the cheapest correct version of itself?*
 
-**Cost optimization suggestions:**
-- *Immediate:* write coalescing (Top 10 #4) — cuts the dominant cost on exactly the hot-counter workload; native TTL (Top 10 #3) — caps storage.
-- *Structural:* consider persistence-exempting short-TTL keys (most rate-limit/sliding-window state) — Service-Bus-only replication for them preserves HA-for-restarts of *nodes* while avoiding per-increment RU on data that expires in seconds anyway. Full-cluster restart would reset those counters — which was the accepted contract for all data until this month.
-- *Decision-level:* do the managed-Redis comparison honestly (price, consistency, code ownership) and record the outcome in `docs/high-availability.md`. Whichever way it lands, the reasoning should be as well-documented as the original single-replica reasoning was.
+**Resource utilization assessment (3/5 — up from 2/5, with a clear path to 4–5/5):**
+
+**What the bill is made of, and what's already been done:**
+
+| Cost component | Driver | State |
+|---|---|---|
+| Cosmos writes (dominant) | 1 write per mutating command, per key | ✅ Coalescing collapses hot-key bursts; ✅ patches ship only touched fields; ⬜ default indexing multiplies every write's RU (#1); ⬜ short-TTL keys still persisted (#2); ⬜ cadence latency-bound, not policy-bound (#3); ⬜ field events uncoalesced (#4) |
+| Cosmos storage | Keyspace size over time | ✅ Native TTL evicts dead keys — growth is now self-limiting |
+| Cosmos reads | Hydration, anti-entropy (5 min), admin views, heartbeat-driven queries | ✅ Hydration filtered/bounded; ⬜ anti-entropy should ride `_ts` (#8); ⬜ heartbeat payload grows with rooms (#7) |
+| Service Bus | Standard-tier base (~$10/mo) + per-operation | ✅ Coalescing cuts ops; per-op cost is cents-per-million — secondary |
+| Compute | 2–5 × (0.25 vCPU / 0.5 Gi) | ≈ $20–75/mo; connection-based autoscale is a sane driver |
+| The unmeasured term | RU per command class | ⬜ `requestCharge` discarded today (#5) — the whole model is currently estimated, not observed |
+
+**The strategy in one line:** *stop persisting what expires anyway (#2), stop indexing what's never queried (#1), write durably on a clock instead of a latency (#3), merge what supersedes (#4) — and meter it all (#5) so the capacity mode (#6) is bought, not guessed.*
+
+**Order-of-magnitude effect (to be validated by #5/#10):** for a rate-limit-heavy workload, #2 alone can remove the majority of durable writes; #1 cuts the RU of each remaining container-typed write several-fold; #3/#4 flatten hot-key and presence churn. Together they plausibly take the Cosmos line from "dominant, scales with traffic" to "modest, scales with *durable* data" — which is the correct shape for this architecture, since Service Bus (cheap) carries the real-time load and Cosmos (metered) should carry only what genuinely needs to survive a full restart.
+
+**Operational overhead:** the carrying cost of owning the replication layer dropped meaningfully this pass — adversarial tests, honest docs, fail-fast invariants, and no secrets to rotate. That cost was the third pass's biggest concern; it has been actively managed down.
 
 ---
 
 <a name="roadmap"></a>
 ## Implementation Roadmap
 
-**Phase 1 — Immediate (this week): make the HA layer safe to operate.**
-Top 10 #1 (fail-fast on partial config — hours, highest severity), #2 (TTL-only replication events), #3 (Cosmos native TTL + hydration filter), #4 (write coalescing + RU measurement), #5 (delta `INCR`). Roughly 2–3 focused days, all in code merged this week.
+**Phase 1 — Immediate (this week): the cost package.**
+Top 10 #1 (indexing policy — infra config, biggest single lever), #5 (RU metering — makes everything else measurable), #9's one-liner (`index.ts:52`), then #2 and #3 (persistence exemption + durable-write cadence — the structural RU winners), #4 (field coalescing). Commit the decision record. Roughly 2–3 focused days.
 
-**Phase 2 — 3–6 months: distributed-systems operational maturity.**
-- Divergence detection and recovery: fatal-on-dead-subscription, periodic incremental re-hydration (Top 10 #6).
-- Replication observability: lag/latency histograms, in-flight gauge, applied-events counter, hydration metrics; alert rules.
-- Managed identity + least privilege for Service Bus and Cosmos; threat-model update (Top 10 #7).
-- Adversarial fake-transport modes and consistency-claim tests (Top 10 #9).
-- The carried single-node floor: O(keyspace)/O(entry) hot paths, `AUTH` throttling, supply-chain pinning, bounded crash shutdown, runbook (Top 10 #8, #10).
-- Load test: replication overhead per write, hydration time vs. keyspace size, autoscale behavior under connection churn; publish the measured envelope.
+**Phase 2 — 3–6 months: measured operation.**
+- #6 capacity-mode selection + RU spend alarm from a week of #5 data.
+- #10 load test; publish the measured envelope and cost model; right-size replicas and limits; decide whether the O(entry) accounting recompute matters at real entry sizes.
+- #7 heartbeat trim + nodes-container TTL; #8 `_ts` watermark.
+- Carried floor: slow-command log, admin runbook (including "is replication flowing" diagnostics), schema check on `applyRemoteEvent`, flip `npm audit` to blocking when the transitive tree clears.
 
-**Phase 3 — 6–12 months: evolve or consolidate.**
-- Revisit the premise with production data: measured availability incidents prevented, measured RU spend, measured divergence events. Keep HA if the numbers justify it; if they don't, the standalone code path — still fully intact and hermetically tested — is the fallback the architecture deliberately preserved.
-- If HA stays: `Buffer`-based values (now saves memory × N replicas), namespace sharding playbook per use case, possible delta-replication generalization (hash field writes are already effectively deltas).
-- If durability stays: revisit which key classes deserve it (persistence-exempt TTL'd keys).
+**Phase 3 — 6–12 months: capacity evolution.**
+- `Buffer`-based values (memory × N replicas is now the binding capacity resource).
+- Namespace-sharding playbook (second independent cluster per use case) as the documented answer to outgrowing one node's memory.
+- Counter-origin compaction if long-lived counters become a real pattern (#9).
+- Revisit `PUBLISH` fan-out only if Socket.IO room scale demands it.
 
 ---
 
 <a name="metrics"></a>
 ## Architecture Metrics
 
-**Quantitative assessments** (second pass → now):
+**Quantitative assessments** (third pass → now):
 
 | Dimension | Score | Basis |
 |---|---|---|
-| Performance | **3/5** (was 4/5) | Local read/write path unchanged and fast; every write now carries async Cosmos+Service Bus work, three background O(keyspace) walks, and peer-apply overhead. Replication lag unmeasured. |
-| Reliability | **3/5** (was 4/5 single-node) | Scored against the new, harder promise: node-loss survival genuinely delivered; offset by silent-divergence risk, the split-brain misconfiguration path, the EXPIRE clobber race, and the hydration time bomb. |
-| Security | **3/5** (was 4/5) | Single-node floor intact; new broad-privilege secrets and an undocumented trust-boundary expansion regress the posture until Top 10 #7 lands. |
-| Cost | **2/5** (was 5/5) | Two managed services + per-write RU on ephemeral data inverts the original thesis at moderate write rates; unmeasured. |
-| Maintainability | **3/5** (was 4/5) | The new code is well-structured, well-commented, and well-tested for what fakes can cover — but it is 1,500 lines of distributed-systems logic coupled to Azure semantics, the most expensive category of code to own. |
+| Performance | **4/5** (was 3/5) | O(keyspace) background walks eliminated from heartbeat/gauge; hydration bounded and filtered; remaining items (O(entry) accounting, fan-out) are known and measured-before-fixed. |
+| Reliability | **4/5** (was 3/5) | All five pre-production defects closed with tests; convergence defended at three layers (events → anti-entropy → restart); split-brain impossible by construction; remaining LWW races are documented design choices. |
+| Security | **4/5** (was 3/5) | Managed identity everywhere, zero broad secrets, auth throttling, supply-chain scanning, updated threat model. Remaining: event schema validation, blocking audit, runbook. |
+| Cost | **3/5** (was 2/5, reframed) | Scored against the committed architecture's own optimum: coalescing + native TTL landed; the five structural levers (#1–#4, #7) and the metering (#5) that proves them are identified, cheap, and unstarted. |
+| Maintainability | **4/5** (was 3/5) | The distributed layer is now adversarially tested, its invariants are executable, its failure modes documented, and its config surface fully described. Owning it is a real ongoing cost, but a managed one. |
 
 **Qualitative assessments:**
-- *Fitness for purpose:* **Conditional.** As an engineering artifact, the HA layer is executed with unusual care — the hydration buffering, no-op filtering, and field-granularity reasoning are better than most production systems manage. Whether it *fits the purpose* depends on the unanswered premise question: it delivers durability the data contract never required, at a cost structure that likely exceeds the managed alternative it was built to avoid, with weaker consistency on the flagship use case. Fitness is a decision away, in either direction.
-- *Future-proofing:* **Good mechanically** — standalone mode is fully preserved and hermetically tested, so the pivot is reversible; limits and cluster config are env-driven; the declarative replication registry means new commands can't silently skip replication.
-- *Technical debt:* prior passes' debt largely unaddressed (see status table) and now joined by the HA layer itself. The three highest-interest items are the split-brain fallback, the missing anti-entropy, and the unmeasured cost model.
-- *Team capability alignment:* **the axis that moved most.** Passes one and two reviewed a system a competent TypeScript team could fully own. Multi-master replication over Service Bus + Cosmos demands distributed-systems failure-mode thinking and Azure-specific operational knowledge (RU governance, subscription idle semantics, receiveAndDelete loss modes) on an ongoing basis. The team that wrote it clearly has the skill; the question is whether owning it forever is the best use of that skill.
-- *Innovation potential:* the declarative replication registry and the snapshot+buffered-replay hydration are patterns worth reusing. The honest consistency documentation is a practice worth institutionalizing.
+- *Fitness for purpose:* **High, and now unconditional.** The third pass's conditionality hinged on an alternative that turned out not to exist operationally. Within the committed architecture, the implementation is correct where it must be (G-counter, TTL events, anti-entropy) and honest where it chooses not to be (LWW on overwrites).
+- *Future-proofing:* the per-shape event taxonomy is the asset — every cost lever in this pass's Top 10 slots into machinery that already exists (a class here, a time gate there, a query predicate there). No redesign is required to reach the cheap version of this system.
+- *Technical debt:* enumerated and small; the pattern across four passes — findings raised, findings fixed with tests, stronger than asked — is the healthiest debt-management signal a codebase can show.
+- *Team capability alignment:* the adversarial test suite materially de-risks ownership of the replication protocol; the remaining skill dependency is Azure cost mechanics (RU accounting, indexing policy, capacity modes), which is exactly what #5/#6 turn from expertise into dashboards.
+- *Innovation potential:* the G-counter-with-seed-origin interop and the coalescing-class queue are both reusable designs; the "documented consistency claim → adversarial test" discipline is worth adopting as a standing rule for any future replication change.
 
-**Bottom line.** The first review's theme was "an unbounded thing needs a bound" — resolved. The second's was "refine the bounds" — mostly still open. This pass's theme is different in kind: **a well-built answer needs its question validated.** The HA implementation is careful, honest about its trade-offs, and reversible by design. But it triples the operational surface, inverts the cost thesis, and weakens consistency on the system's primary use case — while five concrete defects (split-brain fallback, EXPIRE clobbering, unbounded Cosmos growth, uncoalesced hot-key writes, silent divergence) stand between the current code and production. Fix those five this week; answer the premise question before the first production deployment, and write the answer down with the same candor the rest of these docs already show.
+**Bottom line.** Pass one: bound the unbounded — done. Pass two: refine the bounds — done (eventually). Pass three: five defects and a premise question — the defects are fixed with tests, and the premise is settled by operational reality: **this is the architecture.** What remains is the most tractable problem this review has had in four passes: a metered, five-lever cost-reduction program (index policy, persistence exemption, write cadence, field coalescing, RU telemetry) that requires no redesign, no new services, and no consistency trade the data contract hasn't already accepted. Run the Phase 1 package, read the meters for a week, buy the right capacity mode — and this system will be both the thing managed Redis couldn't be here (deployable) and the thing it was originally promised to be (cheap).
