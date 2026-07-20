@@ -41,6 +41,46 @@ describe('Store strings', () => {
     expect(() => store.get('h')).toThrow(WrongTypeError);
     expect(() => store.incr('h')).toThrow(WrongTypeError);
   });
+
+  it('SET NX only writes when the key is absent (lock-acquire semantics)', () => {
+    expect(store.set('lock', 'owner-a', { nx: true })).toEqual({ set: true, oldValue: null });
+    expect(store.set('lock', 'owner-b', { nx: true })).toEqual({ set: false, oldValue: null });
+    expect(store.get('lock')).toBe('owner-a'); // first writer keeps the lock
+  });
+
+  it('SET XX only writes when the key already exists', () => {
+    expect(store.set('k', 'v', { xx: true })).toEqual({ set: false, oldValue: null });
+    store.set('k', 'v1');
+    expect(store.set('k', 'v2', { xx: true }).set).toBe(true);
+    expect(store.get('k')).toBe('v2');
+  });
+
+  it('SET GET returns the prior value and errors on a non-string key', () => {
+    expect(store.set('k', 'new', { get: true })).toEqual({ set: true, oldValue: null });
+    expect(store.set('k', 'newer', { get: true })).toEqual({ set: true, oldValue: 'new' });
+    store.hset('h', [['f', 'v']]);
+    expect(() => store.set('h', 'x', { get: true })).toThrow(WrongTypeError);
+  });
+
+  it('MGET returns nil for missing and non-string keys, values otherwise', () => {
+    store.set('s', 'v');
+    store.hset('h', [['f', 'v']]);
+    expect(store.mget(['s', 'missing', 'h'])).toEqual(['v', null, null]);
+  });
+
+  it('MSET writes every pair and clears any prior TTL', () => {
+    store.set('a', 'old', { pxMs: 10_000 });
+    store.mset([['a', '1'], ['b', '2']]);
+    expect(store.get('a')).toBe('1');
+    expect(store.get('b')).toBe('2');
+    expect(store.pttlMs('a')).toBe(-1); // TTL cleared by MSET
+  });
+
+  it('EXISTS counts present keys including duplicates', () => {
+    store.set('a', '1');
+    store.set('b', '2');
+    expect(store.existsCount(['a', 'a', 'b', 'missing'])).toBe(3);
+  });
 });
 
 describe('Store TTL', () => {
@@ -107,6 +147,65 @@ describe('Store TTL', () => {
     expect(sweeping.get('k')).toBe('v2');
     expect(sweeping.stats().keyCounts.string).toBe(1);
     sweeping.close();
+  });
+
+  it('pttlMs reports -2 (missing), -1 (no TTL), then the remaining lifetime', () => {
+    expect(store.pttlMs('missing')).toBe(-2);
+    store.set('k', 'v');
+    expect(store.pttlMs('k')).toBe(-1);
+    store.set('k', 'v', { pxMs: 5000 });
+    expect(store.pttlMs('k')).toBe(5000);
+    vi.advanceTimersByTime(1000);
+    expect(store.pttlMs('k')).toBe(4000);
+  });
+
+  it('SET KEEPTTL preserves the existing TTL while overwriting the value', () => {
+    store.set('k', 'v1', { pxMs: 5000 });
+    store.set('k', 'v2', { keepTtl: true });
+    expect(store.get('k')).toBe('v2');
+    expect(store.pttlMs('k')).toBe(5000); // TTL survived the overwrite
+    // A plain SET (no KEEPTTL) clears the TTL.
+    store.set('k', 'v3');
+    expect(store.pttlMs('k')).toBe(-1);
+  });
+});
+
+describe('Store SCAN', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('returns all keys with no filter', () => {
+    store.set('a', '1');
+    store.set('b', '2');
+    store.hset('h', [['f', 'v']]);
+    expect(new Set(store.scanKeys(null, null))).toEqual(new Set(['a', 'b', 'h']));
+  });
+
+  it('MATCH filters by glob and TYPE filters by kind', () => {
+    store.set('session:1', 'v');
+    store.set('session:2', 'v');
+    store.set('other', 'v');
+    store.hset('session:h', [['f', 'v']]);
+    expect(new Set(store.scanKeys(/^session:.*$/, null))).toEqual(
+      new Set(['session:1', 'session:2', 'session:h']),
+    );
+    expect(new Set(store.scanKeys(/^session:.*$/, 'string'))).toEqual(
+      new Set(['session:1', 'session:2']),
+    );
+  });
+
+  it('skips expired keys', () => {
+    vi.useFakeTimers();
+    const s = new Store(0);
+    s.set('live', 'v');
+    s.set('dead', 'v', { pxMs: 10 });
+    vi.advanceTimersByTime(50);
+    expect(s.scanKeys(null, null)).toEqual(['live']);
+    s.close();
+    vi.useRealTimers();
   });
 });
 
@@ -182,7 +281,7 @@ describe('Store sorted sets', () => {
       [now - 1000, 'recent'],
     ]);
     const removed = store.zremrangebyscore('workspace:w1', parseScoreBound('0'), parseScoreBound(String(now - dayMs)));
-    expect(removed).toBe(1);
+    expect(removed).toEqual(['too-old']);
     expect(store.zcount('workspace:w1', parseScoreBound('-inf'), parseScoreBound('+inf'))).toBe(1);
   });
 
@@ -190,5 +289,134 @@ describe('Store sorted sets', () => {
     store.zadd('z', [[1, 'a']]);
     store.zremrangebyscore('z', parseScoreBound('-inf'), parseScoreBound('+inf'));
     expect(store.exists('z')).toBe(false);
+  });
+});
+
+describe('Store fast counters (memoryBytesEstimate / keyCounts)', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('tracks per-type key counts incrementally as keys are created and removed', () => {
+    expect(store.keyCounts()).toEqual({ string: 0, hash: 0, sortedset: 0 });
+    store.set('s1', 'v');
+    store.set('s2', 'v');
+    store.hset('h1', [['f', 'v']]);
+    store.zadd('z1', [[1, 'm']]);
+    expect(store.keyCounts()).toEqual({ string: 2, hash: 1, sortedset: 1 });
+
+    store.del(['s1']);
+    store.hdel('h1', ['f']); // empties the hash -> whole key removed
+    expect(store.keyCounts()).toEqual({ string: 1, hash: 0, sortedset: 1 });
+  });
+
+  it('keyCounts() agrees with the independent stats() walk after a mix of writes', () => {
+    store.set('a', 'x');
+    store.incr('counter');
+    store.hset('h', [['f1', 'v'], ['f2', 'v']]);
+    store.zadd('z', [[1, 'm']]);
+    store.set('a', 'y'); // in-place replace, not a new key
+    expect(store.keyCounts()).toEqual(store.stats().keyCounts);
+  });
+
+  it('memoryBytesEstimate() moves with writes and matches the walked estimate', () => {
+    expect(store.memoryBytesEstimate()).toBe(0);
+    store.set('k', 'value');
+    const afterSet = store.memoryBytesEstimate();
+    expect(afterSet).toBeGreaterThan(0);
+    expect(afterSet).toBe(store.stats().memoryEstimateBytes);
+
+    store.del(['k']);
+    expect(store.memoryBytesEstimate()).toBe(0);
+  });
+
+  it('counts stay exact when a replicated field-set creates a brand-new key', () => {
+    store.applyReplicatedHashFieldSet('h', [['f', 'v']]);
+    store.applyReplicatedZsetMemberSet('z', [['m', 1]]);
+    expect(store.keyCounts()).toEqual({ string: 0, hash: 1, sortedset: 1 });
+    expect(store.keyCounts()).toEqual(store.stats().keyCounts);
+  });
+});
+
+describe('Store.applyReplicatedTtl', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('sets a TTL on an existing key without touching its value', () => {
+    store.set('k', 'v');
+    const at = Date.now() + 60_000;
+    store.applyReplicatedTtl('k', at);
+    expect(store.get('k')).toBe('v');
+    const detail = store.getKeyDetail('k');
+    expect(detail?.info.ttlMsRemaining).not.toBeNull();
+  });
+
+  it('leaves other hash fields intact (TTL-only, never a whole-entry overwrite)', () => {
+    store.hset('h', [['f1', 'v1'], ['f2', 'v2']]);
+    store.applyReplicatedTtl('h', Date.now() + 60_000);
+    expect(new Map(store.hgetall('h'))).toEqual(new Map([['f1', 'v1'], ['f2', 'v2']]));
+  });
+
+  it('is a no-op for a key that does not exist locally (EXPIRE cannot create a key)', () => {
+    store.applyReplicatedTtl('absent', Date.now() + 60_000);
+    expect(store.exists('absent')).toBe(false);
+    expect(store.keyCounts()).toEqual({ string: 0, hash: 0, sortedset: 0 });
+  });
+
+  it('can clear a TTL by passing null', () => {
+    store.set('k', 'v', { exSeconds: 60 });
+    store.applyReplicatedTtl('k', null);
+    expect(store.getKeyDetail('k')?.info.ttlMsRemaining).toBeNull();
+  });
+});
+
+describe('Store INCR as a G-counter', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('sums per-origin contributions (concurrent nodes both count)', () => {
+    expect(store.incr('c', 'node-a')).toBe(1);
+    store.applyReplicatedIncrement('c', 'node-b', 3); // peer contributed 3
+    expect(store.get('c')).toBe('4');
+    expect(store.incr('c', 'node-a')).toBe(5); // node-a now at 2, plus node-b's 3
+    expect(store.contributionFor('c', 'node-a')).toBe(2);
+  });
+
+  it('applyReplicatedIncrement merges by max, so a re-delivered event is idempotent', () => {
+    store.applyReplicatedIncrement('c', 'node-b', 5);
+    store.applyReplicatedIncrement('c', 'node-b', 5); // duplicate
+    store.applyReplicatedIncrement('c', 'node-b', 3); // stale/reordered, lower total
+    expect(store.get('c')).toBe('5'); // never 10, never regressed to 3
+  });
+
+  it('seeds a SET base under the shared origin so it is counted once, not per node', () => {
+    store.set('c', '10');
+    expect(store.incr('c', 'node-a')).toBe(11); // base 10 + node-a's 1
+    // A peer that also increments the same SET-seeded key doesn't re-add the base.
+    store.applyReplicatedIncrement('c', 'node-b', 1);
+    expect(store.get('c')).toBe('12'); // 10 (seed) + 1 (a) + 1 (b)
+  });
+
+  it('SET clears counter state (last-write-wins reset)', () => {
+    store.incr('c', 'node-a');
+    store.incr('c', 'node-a');
+    expect(store.get('c')).toBe('2');
+    store.set('c', '0');
+    expect(store.get('c')).toBe('0');
+    expect(store.contributionFor('c', 'node-a')).toBe(0); // contributions gone
+    expect(store.incr('c', 'node-a')).toBe(1); // counts fresh from the reset base
+  });
+
+  it('still rejects INCR on a non-integer string', () => {
+    store.set('c', 'not-a-number');
+    expect(() => store.incr('c', 'node-a')).toThrow();
   });
 });

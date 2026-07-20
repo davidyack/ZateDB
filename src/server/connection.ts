@@ -8,15 +8,24 @@ import { error as respError } from '../resp/types.js';
 import type { Store } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { ServerConfig } from '../config.js';
+import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 import type { ConnectionContext, ConnectionMode } from '../commands/context.js';
 import { dispatch } from '../commands/dispatcher.js';
-import { commandKeyArg, traceCommand, recordConnectionClosed, recordConnectionOpened, recordSubscriptionChange } from '../telemetry/commandTelemetry.js';
+import {
+  commandKeyArg,
+  traceCommand,
+  recordConnectionClosed,
+  recordConnectionOpened,
+  recordSubscriptionChange,
+  recordConnectionLifecycleEvent,
+} from '../telemetry/commandTelemetry.js';
 import { logger } from '../logger.js';
 
 export interface ConnectionDeps {
   store: Store;
   pubsub: PubSubRegistry;
   config: ServerConfig;
+  cluster: ClusterCoordinator;
 }
 
 /**
@@ -30,17 +39,36 @@ export class Connection implements ConnectionContext {
   authenticated = false;
   mode: ConnectionMode = 'handshake';
   clientName: string | null = null;
+  failedAuthCount = 0;
   readonly remoteAddress: string;
 
-  private parser = new RespRequestParser();
+  private parser: RespRequestParser;
   private closed = false;
 
   constructor(private readonly socket: Socket, private readonly deps: ConnectionDeps) {
     this.remoteAddress = `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 0}`;
     // Starts in 'handshake'; the first command moves it to 'command' (see
     // handleCommand), and a later SUBSCRIBE/PSUBSCRIBE to 'subscriber'.
+    this.parser = new RespRequestParser({
+      maxBulkBytes: deps.config.maxBulkBytes,
+      maxBufferBytes: deps.config.maxBufferBytes,
+    });
     recordConnectionOpened();
+    recordConnectionLifecycleEvent('connection.opened', { connectionId: this.id, remoteAddress: this.remoteAddress });
     logger.debug('connection.opened', { connectionId: this.id, remoteAddress: this.remoteAddress });
+
+    // Reap idle connections so a leaked/abandoned socket can't accumulate
+    // forever. Subscribers legitimately sit idle waiting for messages, so they
+    // are exempt (checked at fire time, since mode changes after connect).
+    if (deps.config.idleTimeoutMs > 0) {
+      socket.setTimeout(deps.config.idleTimeoutMs);
+      socket.on('timeout', () => {
+        if (this.mode !== 'subscriber') {
+          logger.debug('connection.idle_timeout', { connectionId: this.id, remoteAddress: this.remoteAddress });
+          this.socket.end();
+        }
+      });
+    }
 
     socket.on('data', (chunk) => this.onData(chunk));
     socket.on('error', (err) => this.onError(err));
@@ -58,7 +86,15 @@ export class Connection implements ConnectionContext {
         this.socket.end();
         return;
       }
-      throw err;
+      // Any other parser fault is a bug, but it must not take the whole server
+      // down as an uncaught 'data'-handler exception — kill just this socket.
+      logger.error('connection.parser_error', {
+        connectionId: this.id,
+        remoteAddress: this.remoteAddress,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.socket.destroy();
+      return;
     }
 
     for (const rawArgs of commands) {
@@ -76,7 +112,10 @@ export class Connection implements ConnectionContext {
     const keyArg = commandKeyArg(command, rawArgs);
 
     const outcome = traceCommand(command, this.id, keyArg, () =>
-      dispatch({ store: this.deps.store, pubsub: this.deps.pubsub, conn: this, config: this.deps.config }, rawArgs),
+      dispatch(
+        { store: this.deps.store, pubsub: this.deps.pubsub, conn: this, config: this.deps.config, cluster: this.deps.cluster },
+        rawArgs,
+      ),
     );
 
     // Command errors are logged as lightweight lifecycle markers. The command
@@ -94,7 +133,21 @@ export class Connection implements ConnectionContext {
   }
 
   private write(frame: Parameters<typeof serialize>[0]): void {
-    if (this.socket.writable) this.socket.write(serialize(frame));
+    if (!this.socket.writable) return;
+    this.socket.write(serialize(frame));
+    // Slow-consumer guard: a stalled subscriber makes PUBLISH fan-out pile up
+    // in Node's outbound buffer unboundedly (Redis calls this
+    // client-output-buffer-limit). Drop the connection once its backlog crosses
+    // the high-water mark rather than let one slow client OOM the server.
+    const hwm = this.deps.config.outboundHighWaterMarkBytes;
+    if (hwm > 0 && this.socket.writableLength > hwm) {
+      logger.warn('connection.outbound_buffer_exceeded', {
+        connectionId: this.id,
+        remoteAddress: this.remoteAddress,
+        writableLength: this.socket.writableLength,
+      });
+      this.socket.destroy();
+    }
   }
 
   private onError(err: Error): void {
@@ -110,6 +163,12 @@ export class Connection implements ConnectionContext {
     if (channels.length) recordSubscriptionChange('channel', -channels.length);
     if (patterns.length) recordSubscriptionChange('pattern', -patterns.length);
     recordConnectionClosed();
+    recordConnectionLifecycleEvent('connection.closed', {
+      connectionId: this.id,
+      remoteAddress: this.remoteAddress,
+      channelSubscriptions: channels.length,
+      patternSubscriptions: patterns.length,
+    });
     logger.debug('connection.closed', { connectionId: this.id, remoteAddress: this.remoteAddress });
   }
 

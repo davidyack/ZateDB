@@ -13,10 +13,15 @@ by integration tests against the real client libraries that use it — see
 | `CLIENT SETINFO` / `GETNAME` / `SETNAME` / `ID` | No-ops beyond bookkeeping — must never error, since node-redis sends `SETINFO` on every connect and treats an error there as a connection failure. |
 | `QUIT` | Replies `OK`, then closes the socket. |
 | `GET` | Returns a nil bulk string for a missing key. |
-| `SET` | Supports `EX seconds` and `PX ms`. A non-positive or non-integer expiry is rejected (matching real Redis), not silently coerced. |
+| `SET` | Supports `EX seconds`, `PX ms`, `KEEPTTL`, `NX`, `XX`, and `GET`. A non-positive or non-integer expiry is rejected (matching real Redis), not silently coerced. `SET key val NX PX ms` is the distributed-lock primitive; a skipped `NX`/`XX` write replies nil, and `GET` always replies the prior value. `NX`+`XX` or `KEEPTTL`+`EX`/`PX` together are a syntax error. Any other option (e.g. `EXAT`/`PXAT`) returns `ERR unsupported option` rather than being silently accepted — a silently dropped option would hand a lock/idempotency caller the wrong semantics. |
+| `MGET` | Multi-key; a nil entry for each missing or non-string key (never errors on type). |
+| `MSET` | Multi key/value pairs; always `OK`. Each write clears any prior TTL. |
 | `DEL` | Multi-key; returns the count actually removed. |
+| `EXISTS` | Multi-key; returns how many of the given keys exist, counting duplicates. |
 | `INCR` | Creates the key at `0` first, then increments. Errors if the existing value isn't a base-10 integer. |
-| `EXPIRE` / `PEXPIRE` | Support `NX`/`XX`/`GT`/`LT` flags. |
+| `EXPIRE` / `PEXPIRE` | Support `NX`/`XX`/`GT`/`LT` flags. The time argument must be an integer; a fractional value is rejected with `ERR value is not an integer or out of range`. |
+| `TTL` / `PTTL` | Remaining lifetime in seconds / milliseconds. `-2` if the key is missing, `-1` if it exists without a TTL. |
+| `SCAN` | `SCAN cursor [MATCH pattern] [COUNT n] [TYPE type]`. `MATCH` uses Redis glob syntax; `COUNT` is accepted as a hint; `TYPE` filters by `string`/`hash`/`sortedset`. A full iteration completes in one page (cursor returns to `0`) — see below. |
 | `HSET` | Multi field/value pairs; returns the count of *new* fields added. |
 | `HDEL` | Multi-field; deletes the key entirely once its last field is removed. |
 | `HGETALL` | Returns an empty array (not an error) for a missing key. |
@@ -47,13 +52,28 @@ rate/cooldown check typically sends the exclusive/unbounded form, e.g.
 `ZCOUNT key "(1700000000000" "+inf"` to count events in the last N
 milliseconds.
 
+## SCAN iteration
+
+`SCAN` returns every matching key in a single page and a terminating cursor
+of `0`, so a caller's `while (cursor !== '0')` loop finishes after one round
+trip. Redis treats `COUNT` as a hint and permits a full iteration to complete
+in one step, so this is spec-compliant. Returning everything at once also
+avoids the skip-on-delete hazard an offset-based cursor has when a caller
+deletes keys mid-scan — the exact pattern `connect-redis`'s `clear()` and
+similar session/cache stores use. `MATCH` applies Redis glob syntax (shared
+with `PSUBSCRIBE`) and `TYPE` filters to `string`, `hash`, or `sortedset`.
+
+This makes BackendCache a drop-in for the mainstream lock and
+session/cache-store ecosystem (`SET … NX PX` locks, `connect-redis`,
+`cache-manager`, `keyv`) on top of the original rate-limit / pub-sub surface.
+
 ## Non-goals
 
 | Excluded | Why |
 |---|---|
-| `EVAL` / `EVALSHA` / `SCRIPT LOAD` (Lua scripting) | No embedded Lua runtime. `rate-limit-redis`'s default store needs this — see [The rate-limit store deviation](./rate-limit-store.md) for the one place a consuming app needs a small workaround. |
-| Persistence (RDB, AOF) | Everything here is intentionally ephemeral, matching real Redis pub/sub's own fire-and-forget semantics. |
-| Clustering / sharding / replication / multi-node HA | Single process, single dataset, single replica by design — see [Architecture](./architecture.md#why-single-replica). |
+| `EVAL` / `EVALSHA` / `SCRIPT LOAD` (Lua scripting) | No embedded Lua runtime — and none is needed for cross-node atomicity either: HA replication and Cosmos DB persistence use plain upserts/deletes/Patch-API calls, no stored procedures. `rate-limit-redis`'s default store needs Lua — see [The rate-limit store deviation](./rate-limit-store.md) for the one place a consuming app needs a small workaround. |
+| Redis-native persistence (RDB snapshots, AOF) | Durability is handled differently here — key state is persisted to Cosmos DB as part of cross-node replication (see [High availability](./high-availability.md)), not via Redis's own snapshot/append-only-file formats. `PUBLISH` messages are still never persisted anywhere, matching real Redis pub/sub's fire-and-forget semantics. |
+| Redis-native clustering/sharding (`CLUSTER *`, hash slots) | BackendCache's own multi-node HA (see [High availability](./high-availability.md)) is a from-scratch active-active design over Service Bus + Cosmos DB, not an implementation of Redis Cluster's protocol — no consuming app in scope talks `CLUSTER *`. |
 | RESP3, ACLs, other data types (lists, sets, streams, geo, bitmaps, HyperLogLog) | Add on demand when a real caller needs them; don't build speculatively. |
 | TLS termination in-process | Assumes a private, same-environment network hop (e.g. Container Apps internal ingress). Terminate TLS upstream if your network policy requires it in transit. |
 

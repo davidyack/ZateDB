@@ -1,5 +1,11 @@
 # Architecture
 
+This document covers a single node's internals — transport, storage,
+pub/sub, command dispatch, and shutdown. For how multiple nodes stay in
+sync (Service Bus replication, Cosmos DB persistence, startup hydration,
+the consistency model that implies), see
+[High availability](./high-availability.md).
+
 ```
                     ┌─────────────────────────────┐
                     │        BackendCache            │
@@ -10,9 +16,12 @@
                     │  In-memory store (string / hash /     │
                     │   sortedset maps, TTL sweep,            │
                     │   pub/sub registry)                      │
-                    │  HTTP :8081  /healthz                     │
-                    │  HTTP :8082  /admin/*  (token-gated)       │
-                    │  OpenTelemetry traces + metrics              │
+                    │  Cluster coordinator (hydration,           │
+                    │   replication, heartbeat — see              │
+                    │   high-availability.md)                       │
+                    │  HTTP :8081  /healthz, /readyz                  │
+                    │  HTTP :8082  /admin/*  (token-gated)             │
+                    │  OpenTelemetry traces + metrics                   │
                     └─────────────────────────────┘
 ```
 
@@ -90,21 +99,22 @@ A command outside the supported set returns `ERR unknown command` rather
 than silently no-opping — see [Command reference](./command-reference.md)
 for why that matters.
 
+After a mutating command succeeds, the dispatcher hands the resulting key
+state to the `ClusterCoordinator` for cross-node replication — see
+[High availability](./high-availability.md#2-replication). This is
+centralized in the dispatcher rather than in each command handler
+specifically so the handlers above stay unaware that HA exists at all;
+the in-memory mutation they perform is identical whether the process is
+running standalone or as one of several nodes.
+
 ## Graceful shutdown
 
 On `SIGTERM` (which Container Apps sends on scale-down/redeploy), the
 process stops accepting new connections, lets in-flight commands finish
-(all command handling is synchronous, so there's nothing to drain), then
-closes idle connections before exiting. This mirrors the shutdown
-discipline a well-behaved Redis-compatible server is expected to have.
-
-## Why single-replica
-
-Running more than one BackendCache replica would reintroduce the exact
-cross-replica coordination problem it exists to solve, one layer down.
-State is in-memory only, so a restart resets counters and pub/sub
-subscriptions — an acceptable cost for ephemeral, non-billing data (rate
-limits, presence, sliding-window guards). This is out of scope for v1 for
-the same reason a consuming app is often fine running single-instance:
-it matches current status-quo risk. Revisit only if BackendCache's own
-availability becomes a measured problem — don't pre-build HA speculatively.
+(command handling itself is synchronous, so there's nothing to drain
+there), then closes idle connections, drains any in-flight cluster
+replication work (bounded by a timeout), and deregisters its Service Bus
+subscription and node-heartbeat document before exiting. This mirrors the
+shutdown discipline a well-behaved Redis-compatible server is expected to
+have, extended to not lose the last few writes on a controlled redeploy —
+see [High availability](./high-availability.md).
