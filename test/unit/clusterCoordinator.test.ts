@@ -147,6 +147,47 @@ describe('ClusterCoordinator HA mode: hydration filtering & bounding', () => {
   });
 });
 
+describe('ClusterCoordinator heartbeat trimming', () => {
+  it('caps the per-channel detail but keeps exact totals, and TTLs the node doc', async () => {
+    const durable = new FakeDurableStore();
+    const pubsub = new PubSubRegistry();
+    // Subscribe a fake client to 10 distinct channels.
+    const sub = { id: 's1', sendMessage() {}, sendPMessage() {} };
+    for (let i = 0; i < 10; i++) pubsub.subscribeChannel(sub, `room:${i}`);
+
+    let capturedTtl: number | undefined;
+    const originalPut = durable.putNodeSnapshot.bind(durable);
+    durable.putNodeSnapshot = async (snapshot, ttlSeconds) => {
+      capturedTtl = ttlSeconds;
+      await originalPut(snapshot, ttlSeconds);
+    };
+
+    const store = new Store(0);
+    const cluster = new ClusterCoordinator({
+      store,
+      pubsub,
+      durable,
+      transport: new FakeReplicationHub().createTransport('node-h'),
+      nodeId: 'node-h',
+      haEnabled: true,
+      heartbeatIntervalMs: 10_000,
+      nodeStaleMs: 30_000,
+      heartbeatTopSubscriptions: 3,
+      connectionCount: () => 0,
+      commandsTotal: () => 0,
+    });
+    await cluster.start(); // fires one heartbeat immediately
+
+    const snap = durable.nodes.get('node-h');
+    expect(snap?.subscriptions.channelCount).toBe(10); // exact total preserved
+    expect(snap?.subscriptions.channels.length).toBe(3); // detail capped to top-3
+    expect(capturedTtl).toBe(60); // ceil(nodeStaleMs * 2 / 1000) = 60s
+
+    await cluster.stop();
+    store.close();
+  });
+});
+
 describe('ClusterCoordinator HA mode: anti-entropy & fatal detection', () => {
   it('reconcile() re-applies durable writes this node missed while replication was broken', async () => {
     const durable = new FakeDurableStore();

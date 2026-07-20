@@ -97,8 +97,10 @@ export class FakeDurableStore implements DurableStore {
     this.keys.set(key, { ...existing, members: merged });
     this.updatedAt.set(key, this.nextTs());
   }
-  async putNodeSnapshot(snapshot: NodeSnapshot): Promise<void> {
+  readonly nodeTtlSeconds = new Map<string, number | undefined>();
+  async putNodeSnapshot(snapshot: NodeSnapshot, ttlSeconds?: number): Promise<void> {
     this.nodes.set(snapshot.nodeId, snapshot);
+    this.nodeTtlSeconds.set(snapshot.nodeId, ttlSeconds);
   }
   async listNodeSnapshots(): Promise<NodeSnapshot[]> {
     return Array.from(this.nodes.values());

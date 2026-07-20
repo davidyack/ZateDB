@@ -161,8 +161,17 @@ export class AdminServer {
         ),
       },
       byNode: [
-        { nodeId: this.cluster.nodeId, channels: local.channels, patterns: local.patterns },
-        ...otherPeers.map((n) => ({ nodeId: n.nodeId, channels: n.subscriptions.channels, patterns: n.subscriptions.patterns })),
+        { nodeId: this.cluster.nodeId, channelCount: local.channels.length, patternCount: local.patterns.length, channels: local.channels, patterns: local.patterns },
+        // Peer channel/pattern lists are capped to the top-N by subscriber
+        // count in the heartbeat (see HEARTBEAT_TOP_SUBSCRIPTIONS); the *Count
+        // fields are always exact, so the view is honest about truncation.
+        ...otherPeers.map((n) => ({
+          nodeId: n.nodeId,
+          channelCount: n.subscriptions.channelCount,
+          patternCount: n.subscriptions.patternCount,
+          channels: n.subscriptions.channels,
+          patterns: n.subscriptions.patterns,
+        })),
       ],
     });
   }

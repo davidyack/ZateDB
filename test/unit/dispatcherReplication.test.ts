@@ -243,6 +243,57 @@ describe('dispatcher cluster replication correctness', () => {
     expect((durable.keys.get('rl') as { contributions?: Record<string, number> }).contributions).toEqual({ 'node-a': 5 });
   });
 
+  it('coalesces a burst of HSETs on the same key into far fewer durable patches', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const originalPut = durable.putHashFields.bind(durable);
+    let patchCalls = 0;
+    durable.putHashFields = async (key, fields) => {
+      patchCalls++;
+      if (patchCalls === 1) await firstGate;
+      await originalPut(key, fields);
+    };
+
+    // Seed one field (gated), then a burst of distinct fields queues behind it.
+    dispatch(ctx, ['HSET', 'presence', 'u0', 'online']);
+    for (let i = 1; i < 6; i++) dispatch(ctx, ['HSET', 'presence', `u${i}`, 'online']);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseFirst();
+    await cluster.drain(1000);
+
+    expect(patchCalls).toBe(2); // first (gated) + one merged patch of the other five, not six
+    expect(durable.keys.get('presence')).toEqual({
+      type: 'hash',
+      fields: { u0: 'online', u1: 'online', u2: 'online', u3: 'online', u4: 'online', u5: 'online' },
+      expiresAtMs: null,
+    });
+  });
+
+  it('merges a queued HSET then HDEL of the same field to a net delete', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const originalPut = durable.putHashFields.bind(durable);
+    durable.putHashFields = async (key, fields) => {
+      await firstGate; // hold every hash write so the flap queues and coalesces
+      await originalPut(key, fields);
+    };
+
+    dispatch(ctx, ['HSET', 'presence', 'gate', 'x']); // gated in-flight
+    dispatch(ctx, ['HSET', 'presence', 'u1', 'online']); // queued
+    dispatch(ctx, ['HDEL', 'presence', 'u1']); // queued — folds into the set above → net delete
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseFirst();
+    await cluster.drain(1000);
+
+    const snap = durable.keys.get('presence') as { fields: Record<string, string> };
+    expect(snap.fields.u1).toBeUndefined(); // the flap collapsed to nothing durably
+    expect(snap.fields.gate).toBe('x');
+  });
+
   it('replicates sequential writes to the same key in call order, even if their network round trips would otherwise finish out of order', async () => {
     // Regression: two independent fire-and-forget publishes for the same
     // key raced on their own Cosmos/Service Bus round trips, so a slower

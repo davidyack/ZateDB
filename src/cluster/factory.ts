@@ -94,6 +94,8 @@ export async function createClusterCoordinator(
     nodeStaleMs: config.nodeStaleMs,
     maxMemoryBytes: config.maxMemoryBytes,
     antiEntropyIntervalMs: config.antiEntropyIntervalMs,
+    durabilityMinTtlMs: config.durabilityMinTtlMs,
+    heartbeatTopSubscriptions: config.heartbeatTopSubscriptions,
     onFatalReplicationError: deps.onFatalReplicationError,
     connectionCount: deps.connectionCount,
     commandsTotal: deps.commandsTotal,

@@ -88,6 +88,9 @@ originating request's trace. This is an accepted gap.
 | `backendcache.pubsub.subscriptions.active` | UpDownCounter | `type` (channel/pattern) |
 | `backendcache.admin.actions.total` | Counter | `action`, `result` |
 | `backendcache.keys.count` | Observable gauge | `type` (string/hash/sortedset) — this node's live in-memory key count, sampled on export |
+| `backendcache.cosmos.request_units` | Counter | `operation` (upsert/patch/query/delete) — Cosmos RU consumed, the dominant HA cost. Slope over time is the cost signal for capacity-mode/threshold decisions |
+| `backendcache.servicebus.publishes` | Counter | — replication events published to the topic |
+| `backendcache.replication.queue_depth` | Observable gauge | pending + in-flight replication tasks — where write back-pressure accumulates under bursts or a slow Cosmos |
 
 ### Logs
 

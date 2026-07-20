@@ -1,5 +1,17 @@
 # High availability
 
+> ## Architecture decision record: why not managed Redis?
+>
+> **Azure Cache for Redis was evaluated and rejected as the cross-replica
+> backend after 20+ failed deployment attempts in this Azure environment.**
+> BackendCache's Cosmos DB + Service Bus HA design is therefore the
+> committed architecture — it is the option that actually deploys here.
+> Reviews and future work optimize *within* this design (run-cost,
+> correctness, observability) rather than relitigating the choice of
+> backend. The trade-offs it accepts — eventual consistency, last-write-wins
+> on overwrites, per-write Cosmos RU cost — are documented below and are
+> managed, not incidental.
+
 BackendCache runs as multiple nodes behind one internal Container Apps
 ingress. Each node holds a full in-memory copy of the keyspace for fast
 reads, stays in sync with every other node over Azure Service Bus, and
@@ -69,15 +81,23 @@ The exact *shape* of what's replicated depends on the command:
   own preserves the field-granularity guarantee (see the TTL bullet in the
   consistency model).
 
-**Write coalescing.** Same-key whole-key writes (`SET`/`INCR`/`DEL`) that
-queue up faster than they drain are collapsed to the latest one before the
-network round trip: a burst of N `INCR`s on one hot counter costs one
-in-flight Cosmos write plus one coalesced write, not N — each absolute
-upsert fully supersedes the previous, so shipping the intermediates would
-be wasted Cosmos RUs and Service Bus operations. Field/member deltas and
-TTL changes are never coalesced away (each carries a distinct change a
-later one doesn't contain), and coalescing never reorders across different
-kinds, so a `SET` → `EXPIRE` → `HSET` sequence on one key stays ordered.
+**Write coalescing.** Same-key writes that queue up faster than they drain
+are collapsed before the network round trip, so a hot key costs roughly one
+Cosmos write + one Service Bus message per drain instead of one per command:
+
+- Whole-key writes (`SET`/`DEL`), `INCR` contributions, and `TTL` changes
+  each collapse to the *latest* queued write of their class — each fully
+  supersedes the previous (an absolute value, a cumulative counter total, an
+  expiry).
+- Field/member deltas (`HSET`/`HDEL`/`ZADD`/`ZREMRANGEBYSCORE`) **merge**
+  rather than collapse: queued changes for the same key fold into one net
+  patch + event, where a later set of a field wins over an earlier set or
+  delete of it and vice versa. A presence field flapping online/offline, or
+  a sliding window churning members, costs one patch per drain, not one per
+  flap.
+
+Coalescing never reorders across different kinds, so a `SET` → `EXPIRE` →
+`HSET` sequence on one key stays ordered.
 
 This is **fire-and-forget relative to the client's reply** — the RESP
 response the client already received reflects the fast local mutation,
@@ -258,9 +278,11 @@ mode.
   diverging forever, which is the failure this replaces.
 - **Anti-entropy backstop**: every `ANTI_ENTROPY_INTERVAL_MS` (default
   5 min, matching the Service Bus message TTL) each node re-loads the
-  durable keys written since its last pass (`WHERE updatedAtMs > @since`)
-  and applies them locally. This is a cheap convergence safety net for
-  anything a node missed during a brief partition or receiver blip —
+  durable keys written since its last pass (`WHERE c._ts > @since`, riding
+  Cosmos's server-assigned write timestamp so one server clock — not every
+  writer node's own clock — defines the watermark, which a slow-clocked peer
+  can't slip beneath) and applies them locally. This is a cheap convergence
+  safety net for anything a node missed during a brief partition or blip —
   applying Cosmos's snapshot is safe under last-write-wins (Cosmos is the
   source of truth, and its field/member-patched documents already reflect
   the merged state), so a missed write converges on the next pass instead
@@ -316,3 +338,55 @@ mode.
   is a base64url encoding of the key, with the original key kept verbatim
   in a `key` property (used as the partition key, which has no such
   restriction) — see [`src/cluster/cosmosDurableStore.ts`](../src/cluster/cosmosDurableStore.ts).
+
+## Cost
+
+Cosmos DB request units (RU) are the dominant marginal cost of this
+architecture; Service Bus operations and replica compute are secondary.
+Reads are free (always local). So the bill is essentially *mutating-write
+rate × whether we persist the write* — which is where the levers are.
+
+- **Short-TTL persistence exemption (`DURABILITY_MIN_TTL_MS`).** The
+  highest-write-rate keys — fixed-window rate-limit counters, sliding-window
+  zsets — live seconds to a minute and would expire long before any restart
+  or anti-entropy pass could read them back. Setting this threshold makes a
+  key whose *remaining TTL* is under it skip the Cosmos write entirely:
+  peers still converge over Service Bus (they never read Cosmos for live
+  replication), and hydration/anti-entropy simply never see a key that would
+  be dead anyway. This removes the dominant RU source outright rather than
+  optimising it. **Trade-off:** a *full-cluster* restart loses sub-threshold
+  keys — which was the accepted contract for *all* data before persistence
+  existed, and is the right trade for a rate-limit counter that resets in
+  seconds. Keys with no TTL, or a TTL above the threshold, are always
+  persisted; deletes are always durable. Off by default (`0`); a sensible
+  enabled value is `60000`, but derive it from a load test (see below).
+- **Native TTL caps storage.** Every durable document carries a Cosmos `ttl`
+  derived from its expiry, so dead keys self-evict (see Operational notes) —
+  storage is self-limiting even for the keys that *are* persisted.
+- **Coalescing caps write frequency.** A burst of same-key writes collapses
+  to the latest before the round trip (see the Replication section), so a
+  hot counter costs roughly one durable write per drain, not one per command.
+
+**A further lever, deferred until metered.** Decoupling the *Cosmos* write
+cadence from the *Service Bus* cadence — a per-key minimum interval between
+durable writes, so a steadily-written hot key persists at most once per
+interval while peers keep converging per broadcast — would trim RU beyond
+what coalescing already does. It is intentionally not implemented yet: its
+marginal benefit largely overlaps the coalescing above, a correct
+trailing-edge throttle needs per-key timers and a per-key timestamp map
+(an unbounded-memory hazard on a large keyspace that must be bounded
+carefully), and the right interval can only be chosen from the
+`backendcache.cosmos.request_units` meter under real load. Add it if the
+metered RU justifies the machinery.
+
+**Right-sizing.** The numeric threshold above, the Cosmos capacity mode
+(serverless vs. provisioned/autoscale), and replica count/size should be
+derived from a representative load test with RU metering on, not guessed —
+serverless bills per request and wins at low/bursty RU, while autoscale
+provisioned throughput wins once sustained RU/s clears a few hundred. Set a
+custom Cosmos **indexing policy** on the `keys` container that indexes only
+the paths queries actually touch (`/key`, `/updatedAtMs`, `/entry/expiresAtMs`)
+and excludes the rest — the default policy indexes every field of every hash
+and every member of every zset, and write RU scales with indexed paths, so
+this is typically a several-fold write-RU reduction for pure infra config.
+See [Deployment](./deployment.md) for the env surface.

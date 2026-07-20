@@ -8,17 +8,55 @@ import { redactKey } from '../telemetry/commandTelemetry.js';
 import { errorMessage, logger } from '../logger.js';
 
 /**
+ * Accumulated field/member changes for one key, so consecutive queued
+ * `HSET`/`HDEL` (or `ZADD`/`ZREMRANGEBYSCORE`) tasks fold into one net patch
+ * + one event: a later set of a field wins over an earlier set or delete of
+ * it, and a later delete wins over an earlier set. `set` values are strings
+ * for hashes and numbers (scores) for sorted sets.
+ */
+interface FieldPayload {
+  type: 'hash' | 'zset';
+  set: Map<string, string | number>;
+  del: Set<string>;
+}
+
+/**
+ * Folds `next` into `acc` in place: for a container-typed key, a later
+ * operation on a field/member supersedes an earlier one — a set clears any
+ * pending delete of the same name and vice versa.
+ */
+/** Returns the `n` highest-scoring items (by `score`, descending); the whole array when `n <= 0`. */
+function topBy<T>(items: T[], n: number, score: (item: T) => number): T[] {
+  if (n <= 0 || items.length <= n) return items;
+  return [...items].sort((a, b) => score(b) - score(a)).slice(0, n);
+}
+
+function mergeFieldPayload(acc: FieldPayload, next: FieldPayload): void {
+  for (const [name, value] of next.set) {
+    acc.set.set(name, value);
+    acc.del.delete(name);
+  }
+  for (const name of next.del) {
+    acc.del.add(name);
+    acc.set.delete(name);
+  }
+}
+
+/**
  * A queued replication side-effect for one key. `coalesceClass` groups
  * writes that fully supersede one another: two consecutive `'whole'` writes
- * (SET/INCR/DEL — each ships the key's entire post-state) collapse to the
- * later one, and two consecutive `'ttl'` writes likewise. Field/member
- * deltas use `'field'` and never coalesce (each carries a distinct
- * field/member change that a later one doesn't contain), and mixed classes
- * never coalesce across each other, preserving order.
+ * (SET/DEL — each ships the key's entire post-state) collapse to the later
+ * one, `'ttl'` and `'incr'` likewise. `'field'` tasks carry a mutable
+ * `field` payload that later same-key field tasks merge into (so
+ * HSET/HDEL/ZADD/ZREMRANGEBYSCORE bursts on one key collapse to a single net
+ * patch + event). Mixed classes never coalesce across each other, preserving
+ * order.
  */
 interface ReplicationTask {
   coalesceClass: 'whole' | 'ttl' | 'field' | 'incr';
   run: () => Promise<void>;
+  /** Present only for the 'field' class — the accumulator later field tasks merge into. */
+  field?: FieldPayload;
 }
 
 export interface ClusterCoordinatorDeps {
@@ -44,6 +82,14 @@ export interface ClusterCoordinatorDeps {
    * replication events. 0 or unset disables it.
    */
   antiEntropyIntervalMs?: number;
+  /**
+   * Keys whose remaining TTL is under this at replication time skip the
+   * Cosmos write (Service Bus still carries them to peers). 0/unset persists
+   * everything. See config.durabilityMinTtlMs.
+   */
+  durabilityMinTtlMs?: number;
+  /** Cap on channels/patterns (each) detailed in a heartbeat snapshot; 0/unset keeps all. See config.heartbeatTopSubscriptions. */
+  heartbeatTopSubscriptions?: number;
   /**
    * Invoked when the replication transport reports an unrecoverable receive
    * condition (subscription gone / sustained errors). The process owner
@@ -154,6 +200,18 @@ export class ClusterCoordinator {
   }
 
   /**
+   * True when a key with this expiry is too short-lived to be worth a Cosmos
+   * write: peers still converge over Service Bus, and the key would expire
+   * long before any restart/anti-entropy pass could read it back. Keys with
+   * no TTL are always durable. See config.durabilityMinTtlMs.
+   */
+  private skipDurableForTtl(expiresAtMs: number | null | undefined): boolean {
+    const min = this.deps.durabilityMinTtlMs ?? 0;
+    if (min <= 0 || expiresAtMs === null || expiresAtMs === undefined) return false;
+    return expiresAtMs - Date.now() < min;
+  }
+
+  /**
    * Anti-entropy backstop: re-load every durable key written since the last
    * pass and apply it locally, repairing anything this node missed while
    * replication was briefly broken (a partition past the message TTL, a
@@ -258,10 +316,12 @@ export class ClusterCoordinator {
   }
 
   private async doPublishTtlChange(key: string, expiresAtMs: number | null): Promise<void> {
-    await Promise.all([
-      this.deps.durable.putTtl(key, expiresAtMs),
-      this.deps.transport.publish(this.makeEvent({ kind: 'ttl', key, expiresAtMs })),
-    ]);
+    const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'ttl', key, expiresAtMs }));
+    if (this.skipDurableForTtl(expiresAtMs)) {
+      await broadcast; // the EXPIRE that just made this key short-lived — no point persisting the TTL either
+    } else {
+      await Promise.all([this.deps.durable.putTtl(key, expiresAtMs), broadcast]);
+    }
   }
 
   /**
@@ -282,10 +342,15 @@ export class ClusterCoordinator {
   }
 
   private async doPublishIncrement(key: string, total: number): Promise<void> {
-    await Promise.all([
-      this.deps.durable.putIncrement(key, this.nodeId, total),
-      this.deps.transport.publish(this.makeEvent({ kind: 'increment', key, contributionTotal: total })),
-    ]);
+    const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'increment', key, contributionTotal: total }));
+    // The dominant RU source: a hot rate-limit counter with a short TTL. Once
+    // its TTL is under the threshold, peers keep converging over Service Bus
+    // and we stop paying to persist a value that resets in seconds.
+    if (this.skipDurableForTtl(this.deps.store.getRawEntry(key)?.expiresAtMs)) {
+      await broadcast;
+    } else {
+      await Promise.all([this.deps.durable.putIncrement(key, this.nodeId, total), broadcast]);
+    }
   }
 
   private async doPublishKeyChange(key: string, entry: ReturnType<Store['getRawEntry']>): Promise<void> {
@@ -293,13 +358,17 @@ export class ClusterCoordinator {
     // peers apply the broadcast event directly, they don't read it back
     // from Cosmos — so they run concurrently rather than back-to-back.
     if (entry === undefined) {
+      // Deletes stay durable regardless of TTL exemption — cheap, rare, and
+      // skipping one could leave a doc for anti-entropy/hydration to resurrect.
       await Promise.all([this.deps.durable.deleteKey(key), this.deps.transport.publish(this.makeEvent({ kind: 'delete', key }))]);
     } else {
       const snapshot = entryToSnapshot(entry);
-      await Promise.all([
-        this.deps.durable.putKey(key, snapshot),
-        this.deps.transport.publish(this.makeEvent({ kind: 'upsert', key, entry: snapshot })),
-      ]);
+      const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'upsert', key, entry: snapshot }));
+      if (this.skipDurableForTtl(entry.expiresAtMs)) {
+        await broadcast; // short-TTL key: peers get it over Service Bus; skip the Cosmos RU
+      } else {
+        await Promise.all([this.deps.durable.putKey(key, snapshot), broadcast]);
+      }
     }
   }
 
@@ -314,28 +383,65 @@ export class ClusterCoordinator {
    */
   publishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): void {
     if (!this.haEnabled || (setFields.length === 0 && deletedFields.length === 0)) return;
-    this.enqueueForKey(key, 'field', () => this.doPublishHashFieldChange(key, setFields, deletedFields));
+    this.enqueueFieldForKey(key, { type: 'hash', set: new Map(setFields), del: new Set(deletedFields) });
   }
 
   private async doPublishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): Promise<void> {
-    const tasks: Array<Promise<unknown>> = [];
-    if (setFields.length > 0) tasks.push(this.deps.durable.putHashFields(key, setFields));
-    if (deletedFields.length > 0) tasks.push(this.deps.durable.deleteHashFields(key, deletedFields));
-    tasks.push(this.deps.transport.publish(this.makeEvent({ kind: 'hashField', key, setFields, deletedFields })));
+    const tasks: Array<Promise<unknown>> = [this.deps.transport.publish(this.makeEvent({ kind: 'hashField', key, setFields, deletedFields }))];
+    if (!this.skipDurableForTtl(this.deps.store.getRawEntry(key)?.expiresAtMs)) {
+      if (setFields.length > 0) tasks.push(this.deps.durable.putHashFields(key, setFields));
+      if (deletedFields.length > 0) tasks.push(this.deps.durable.deleteHashFields(key, deletedFields));
+    }
     await Promise.all(tasks);
   }
 
   /** Same idea as publishHashFieldChange, for ZADD/ZREMRANGEBYSCORE — see that method's doc comment. */
   publishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): void {
     if (!this.haEnabled || (setMembers.length === 0 && deletedMembers.length === 0)) return;
-    this.enqueueForKey(key, 'field', () => this.doPublishZsetMemberChange(key, setMembers, deletedMembers));
+    this.enqueueFieldForKey(key, { type: 'zset', set: new Map(setMembers), del: new Set(deletedMembers) });
+  }
+
+  /**
+   * Field/member replication with coalescing: consecutive not-yet-started
+   * field tasks for the same key (and same container type) merge into one
+   * net patch + one event, so a high-churn presence hash (the same field
+   * flapping online/offline) or a sliding-window zset costs one Cosmos
+   * patch + one Service Bus message per drain, not one per command. The
+   * running task was already shifted off the front, so merging only ever
+   * folds into a queued task, never an in-flight one.
+   */
+  private enqueueFieldForKey(key: string, payload: FieldPayload): void {
+    let queue = this.replicationQueue.get(key);
+    if (queue === undefined) {
+      queue = [];
+      this.replicationQueue.set(key, queue);
+    }
+    const tail = queue[queue.length - 1];
+    if (tail !== undefined && tail.coalesceClass === 'field' && tail.field !== undefined && tail.field.type === payload.type) {
+      // The tail's run closure reads tail.field at execution time, so
+      // mutating it in place is all that's needed to coalesce.
+      mergeFieldPayload(tail.field, payload);
+    } else {
+      const field = payload;
+      queue.push({ coalesceClass: 'field', field, run: () => this.doPublishFieldPayload(key, field) });
+    }
+    if (!this.draining.has(key)) this.startDraining(key);
+  }
+
+  private doPublishFieldPayload(key: string, field: FieldPayload): Promise<void> {
+    const del = [...field.del];
+    if (field.type === 'hash') {
+      return this.doPublishHashFieldChange(key, [...field.set].map(([f, v]) => [f, v as string]), del);
+    }
+    return this.doPublishZsetMemberChange(key, [...field.set].map(([m, s]) => [m, s as number]), del);
   }
 
   private async doPublishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): Promise<void> {
-    const tasks: Array<Promise<unknown>> = [];
-    if (setMembers.length > 0) tasks.push(this.deps.durable.putZsetMembers(key, setMembers));
-    if (deletedMembers.length > 0) tasks.push(this.deps.durable.deleteZsetMembers(key, deletedMembers));
-    tasks.push(this.deps.transport.publish(this.makeEvent({ kind: 'zsetMember', key, setMembers, deletedMembers })));
+    const tasks: Array<Promise<unknown>> = [this.deps.transport.publish(this.makeEvent({ kind: 'zsetMember', key, setMembers, deletedMembers }))];
+    if (!this.skipDurableForTtl(this.deps.store.getRawEntry(key)?.expiresAtMs)) {
+      if (setMembers.length > 0) tasks.push(this.deps.durable.putZsetMembers(key, setMembers));
+      if (deletedMembers.length > 0) tasks.push(this.deps.durable.deleteZsetMembers(key, deletedMembers));
+    }
     await Promise.all(tasks);
   }
 
@@ -447,18 +553,38 @@ export class ClusterCoordinator {
       // report a key breakdown.
       const keyCounts = this.deps.store.keyCounts();
       const topology = this.deps.pubsub.topology();
+      // Cap the per-name detail so the heartbeat doc (re-written every ~10 s)
+      // doesn't grow its Cosmos write RU with Socket.IO room count; totals
+      // stay exact.
+      const cap = this.deps.heartbeatTopSubscriptions ?? 0;
       const snapshot: NodeSnapshot = {
         nodeId: this.nodeId,
         lastHeartbeatMs: Date.now(),
         connectionCount: this.deps.connectionCount(),
         keyCounts,
         commandsTotal: this.deps.commandsTotal(),
-        subscriptions: topology,
+        subscriptions: {
+          channelCount: topology.channels.length,
+          patternCount: topology.patterns.length,
+          channels: topBy(topology.channels, cap, (c) => c.subscriberCount),
+          patterns: topBy(topology.patterns, cap, (p) => p.subscriberCount),
+        },
       };
-      await this.deps.durable.putNodeSnapshot(snapshot);
+      // TTL the heartbeat doc at ~2× the staleness window so a node that
+      // crashed without deregistering self-cleans (graceful deleteNodeSnapshot
+      // doesn't run on a crash) instead of lingering and re-billing queries.
+      const ttlSeconds = Math.max(1, Math.ceil((this.deps.nodeStaleMs * 2) / 1000));
+      await this.deps.durable.putNodeSnapshot(snapshot, ttlSeconds);
     } catch (err) {
       logger.warn('cluster.heartbeat_failed', { error: errorMessage(err) });
     }
+  }
+
+  /** Pending + in-flight replication work — the depth of the write-behind queue, for the saturation gauge. */
+  replicationQueueDepth(): number {
+    let pending = 0;
+    for (const queue of this.replicationQueue.values()) pending += queue.length;
+    return pending + this.inFlight.size;
   }
 
   /** Live cluster members (heartbeat within nodeStaleMs) for the admin API. Empty in standalone mode. */

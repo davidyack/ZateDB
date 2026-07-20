@@ -8,6 +8,7 @@ import { initTelemetry } from './telemetry/otel.js';
 import { bindKeyCountsSource, getCommandsProcessedTotal } from './telemetry/commandTelemetry.js';
 import { createClusterCoordinator } from './cluster/factory.js';
 import { initSaturationMetrics } from './telemetry/saturation.js';
+import { registerReplicationQueueGauge } from './telemetry/clusterMetrics.js';
 import { logger } from './logger.js';
 
 /**
@@ -49,7 +50,7 @@ async function main(): Promise<void> {
     maxMemoryBytes: config.maxMemoryBytes,
   });
   const pubsub = new PubSubRegistry();
-  bindKeyCountsSource(() => store.stats());
+  bindKeyCountsSource(() => store.keyCounts());
 
   // RespServer.activeConnectionCount() is only available once the server
   // exists, but the cluster coordinator's heartbeat needs it as a
@@ -89,6 +90,7 @@ async function main(): Promise<void> {
   await respServer.listen(config.respPort);
 
   const stopSaturationMetrics = initSaturationMetrics(store, respServer);
+  registerReplicationQueueGauge(() => cluster.replicationQueueDepth());
 
   logger.info('backendcache.started', {
     respPort: config.respPort,
