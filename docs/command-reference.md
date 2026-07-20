@@ -8,6 +8,7 @@ by integration tests against the real client libraries that use it — see
 | Command | Notes |
 |---|---|
 | `PING` | Allowed pre-auth and in subscriber mode. |
+| `INFO` | Redis-style server information as a bulk string of `# Section` blocks with `key:value` lines. Sections: `Server`, `Clients`, `Memory`, `Stats`, `Replication`, `Cluster`, `Keyspace`. `INFO <section>` returns just that section (empty string for an unknown one). Numbers come from the same O(1) store counters and command/connection totals the admin API and telemetry read, so it never walks the keyspace. |
 | `HELLO` | Acknowledged; the connection stays on RESP2 regardless of the requested protover. |
 | `AUTH` | Required before other commands when `REDIS_AUTH_PASSWORD` is set. |
 | `CLIENT SETINFO` / `GETNAME` / `SETNAME` / `ID` | No-ops beyond bookkeeping — must never error, since node-redis sends `SETINFO` on every connect and treats an error there as a connection failure. |

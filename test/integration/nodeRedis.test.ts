@@ -32,6 +32,20 @@ describe('node-redis v5 client against BackendCache', () => {
     expect(await client.ping()).toBe('PONG');
   });
 
+  it('INFO returns parseable server sections', async () => {
+    const info = await client.info();
+    expect(info).toContain('# Server');
+    expect(info).toContain('redis_version:1.0.0');
+    expect(info).toContain('# Replication');
+    expect(info).toContain('role:master');
+  });
+
+  it('INFO accepts a section argument', async () => {
+    const server = await client.info('server');
+    expect(server).toContain('# Server');
+    expect(server).not.toContain('# Replication');
+  });
+
   it('SET/GET round-trips a string', async () => {
     await client.set('k1', 'hello');
     expect(await client.get('k1')).toBe('hello');

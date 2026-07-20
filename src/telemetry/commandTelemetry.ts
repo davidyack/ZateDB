@@ -76,6 +76,20 @@ export function getCommandsProcessedTotal(): number {
 }
 
 /**
+ * Plain readable count of open RESP connections, kept alongside the OTel
+ * `connections.active` UpDownCounter (which is write-only — an exporter
+ * reads it, application code can't). The INFO command's connected_clients
+ * field needs a synchronous number and has no handle to RespServer, so it
+ * reads this instead.
+ */
+let activeConnections = 0;
+
+/** Current open RESP connection count — backs INFO's connected_clients. */
+export function getActiveConnectionCount(): number {
+  return activeConnections;
+}
+
+/**
  * Commands whose first argument is a keyspace key, and therefore eligible to
  * be tagged (redacted) on a span. Deliberately excludes everything else —
  * most importantly AUTH, whose first argument is the password: it must never
@@ -152,10 +166,12 @@ export function traceCommand<T extends DispatchOutcome>(
 }
 
 export function recordConnectionOpened(): void {
+  activeConnections++;
   connectionsActive.add(1);
 }
 
 export function recordConnectionClosed(): void {
+  activeConnections = Math.max(0, activeConnections - 1);
   connectionsActive.add(-1);
 }
 

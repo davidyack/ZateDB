@@ -96,6 +96,36 @@ originating request's trace. This is an accepted gap.
 | `backendcache.scripts.errors.total` | Counter | `phase` (`compile`/`runtime`) |
 | `backendcache.scripts.cache.size` | Observable gauge | — Lua scripts held in this node's SHA1 cache |
 
+### Prometheus `/metrics` endpoint
+
+For environments that scrape rather than receive an OTLP push, the health
+server (same port as `/healthz` and `/readyz`) also serves a
+`GET /metrics` endpoint in Prometheus text exposition format
+(`text/plain; version=0.0.4`). It's a self-contained pull surface that
+lives *alongside* — not instead of — the OTLP/Azure Monitor push pipeline,
+so a plain Prometheus server can scrape the core numbers without wiring up
+an OTLP collector.
+
+It is deliberately unauthenticated (like the health probes) and cheap:
+every value is an already-tracked O(1) aggregate — no keyspace walk — and
+no key names or values are ever exposed, only counts. Exposed families
+(all prefixed `backendcache_`, rendered in
+[`src/telemetry/prometheus.ts`](../src/telemetry/prometheus.ts)):
+
+| Metric | Type | Labels |
+|---|---|---|
+| `backendcache_up` | gauge | — |
+| `backendcache_uptime_seconds` | gauge | — |
+| `backendcache_connected_clients` | gauge | — |
+| `backendcache_commands_processed_total` | counter | — |
+| `backendcache_keys` | gauge | `type` (string/hash/sortedset) |
+| `backendcache_memory_estimate_bytes` | gauge | — |
+| `backendcache_pubsub_channels` / `_patterns` | gauge | — |
+| `backendcache_pubsub_channel_subscriptions` / `_pattern_subscriptions` | gauge | — |
+| `backendcache_ha_enabled` | gauge | — (1 in HA, 0 standalone) |
+| `backendcache_hydrated` | gauge | — |
+| `backendcache_build_info` | gauge | `version`, `node_id` (value always 1) |
+
 ### Logs
 
 Structured JSON logs to stdout/stderr
