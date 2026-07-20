@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     maxMemoryBytes: config.maxMemoryBytes,
   });
   const pubsub = new PubSubRegistry();
-  bindKeyCountsSource(() => store.stats());
+  bindKeyCountsSource(() => store.keyCounts());
 
   // RespServer.activeConnectionCount() is only available once the server
   // exists, but the cluster coordinator's heartbeat needs it as a

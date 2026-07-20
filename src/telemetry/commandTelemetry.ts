@@ -26,20 +26,22 @@ const keysGauge = meter.createObservableGauge('backendcache.keys.count', {
   description: 'Live keys held in this node\'s in-memory store, by type',
 });
 
-let keyCountsSource: (() => ReturnType<Store['stats']>) | null = null;
+let keyCountsSource: (() => ReturnType<Store['keyCounts']>) | null = null;
 
 /**
  * Wires the key-count gauge to a live Store. Called once at startup
  * (index.ts) — kept as a lazily-bound callback rather than a constructor
  * dependency so this module (imported by command handlers before the
- * Store exists) doesn't need to know about wiring order.
+ * Store exists) doesn't need to know about wiring order. Reads the store's
+ * O(1) `keyCounts()` counter, not `stats()` (which walks the whole keyspace)
+ * — this fires on every metric scrape, so it must not be O(keyspace).
  */
-export function bindKeyCountsSource(getStats: () => ReturnType<Store['stats']>): void {
-  keyCountsSource = getStats;
+export function bindKeyCountsSource(getKeyCounts: () => ReturnType<Store['keyCounts']>): void {
+  keyCountsSource = getKeyCounts;
   keysGauge.addCallback((result) => {
-    const stats = keyCountsSource?.();
-    if (!stats) return;
-    for (const [type, count] of Object.entries(stats.keyCounts)) {
+    const keyCounts = keyCountsSource?.();
+    if (!keyCounts) return;
+    for (const [type, count] of Object.entries(keyCounts)) {
       result.observe(count, { type });
     }
   });

@@ -1,5 +1,17 @@
 # High availability
 
+> ## Architecture decision record: why not managed Redis?
+>
+> **Azure Cache for Redis was evaluated and rejected as the cross-replica
+> backend after 20+ failed deployment attempts in this Azure environment.**
+> BackendCache's Cosmos DB + Service Bus HA design is therefore the
+> committed architecture — it is the option that actually deploys here.
+> Reviews and future work optimize *within* this design (run-cost,
+> correctness, observability) rather than relitigating the choice of
+> backend. The trade-offs it accepts — eventual consistency, last-write-wins
+> on overwrites, per-write Cosmos RU cost — are documented below and are
+> managed, not incidental.
+
 BackendCache runs as multiple nodes behind one internal Container Apps
 ingress. Each node holds a full in-memory copy of the keyspace for fast
 reads, stays in sync with every other node over Azure Service Bus, and
