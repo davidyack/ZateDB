@@ -198,7 +198,11 @@ export class AdminServer {
 
   private handleGetKey(key: string, res: ServerResponse): void {
     const detail = this.store.getKeyDetail(key);
-    recordAdminAction('get_key', detail ? 'success' : 'error');
+    const resultLabel = detail ? 'success' : 'error';
+    // Fetching a single key's full value is an explicit, targeted action, so it
+    // is auditable in the same way DELETE is — logged, not a silent debug read.
+    recordAdminAction('get_key', resultLabel);
+    logger.info('admin.action', { action: 'get_key', key, result: resultLabel });
     if (!detail) {
       this.sendJson(res, 404, { error: 'key not found' });
       return;

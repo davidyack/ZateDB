@@ -12,6 +12,7 @@ import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 import type { ConnectionContext, ConnectionMode } from '../commands/context.js';
 import { dispatch } from '../commands/dispatcher.js';
 import {
+  commandKeyArg,
   traceCommand,
   recordConnectionClosed,
   recordConnectionOpened,
@@ -46,13 +47,15 @@ export class Connection implements ConnectionContext {
 
   constructor(private readonly socket: Socket, private readonly deps: ConnectionDeps) {
     this.remoteAddress = `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 0}`;
-    this.mode = 'command';
+    // Starts in 'handshake'; the first command moves it to 'command' (see
+    // handleCommand), and a later SUBSCRIBE/PSUBSCRIBE to 'subscriber'.
     this.parser = new RespRequestParser({
       maxBulkBytes: deps.config.maxBulkBytes,
       maxBufferBytes: deps.config.maxBufferBytes,
     });
     recordConnectionOpened();
     recordConnectionLifecycleEvent('connection.opened', { connectionId: this.id, remoteAddress: this.remoteAddress });
+    logger.debug('connection.opened', { connectionId: this.id, remoteAddress: this.remoteAddress });
 
     // Reap idle connections so a leaked/abandoned socket can't accumulate
     // forever. Subscribers legitimately sit idle waiting for messages, so they
@@ -78,6 +81,7 @@ export class Connection implements ConnectionContext {
       commands = this.parser.feed(chunk);
     } catch (err) {
       if (err instanceof RespProtocolError) {
+        logger.debug('connection.protocol_error', { connectionId: this.id, remoteAddress: this.remoteAddress, error: err.message });
         this.write(respError(`ERR Protocol error: ${err.message}`));
         this.socket.end();
         return;
@@ -102,7 +106,10 @@ export class Connection implements ConnectionContext {
 
   private handleCommand(rawArgs: string[]): void {
     const command = rawArgs[0].toUpperCase();
-    const keyArg = rawArgs.length > 1 ? rawArgs[1] : undefined;
+    // First command leaves the handshake phase. A SUBSCRIBE/PSUBSCRIBE handler
+    // may then advance the connection to 'subscriber' during dispatch below.
+    if (this.mode === 'handshake') this.mode = 'command';
+    const keyArg = commandKeyArg(command, rawArgs);
 
     const outcome = traceCommand(command, this.id, keyArg, () =>
       dispatch(
@@ -110,6 +117,13 @@ export class Connection implements ConnectionContext {
         rawArgs,
       ),
     );
+
+    // Command errors are logged as lightweight lifecycle markers. The command
+    // name and connection id only — never argument values, which can carry key
+    // names, cached payloads, or (for AUTH) the password.
+    if (outcome.isError) {
+      logger.debug('command.error', { connectionId: this.id, remoteAddress: this.remoteAddress, command: outcome.command });
+    }
 
     for (const frame of outcome.frames) this.write(frame);
 

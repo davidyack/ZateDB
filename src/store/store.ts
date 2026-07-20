@@ -2,6 +2,7 @@ import type { Entry, EntryTypeName, HashEntry, SortedSetEntry, StringEntry } fro
 import { NotAnIntegerError, OutOfMemoryError, WrongTypeError } from './types.js';
 import type { ScoreBound } from './scoreRange.js';
 import { scoreInRange } from './scoreRange.js';
+import { logger } from '../logger.js';
 
 export type ExpireFlag = 'NX' | 'XX' | 'GT' | 'LT';
 
@@ -52,6 +53,11 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5000;
  */
 export class Store {
   private data = new Map<string, Entry>();
+  // Index of keys known to carry a TTL, so the active sweep visits only those
+  // rather than scanning the whole keyspace. Kept in sync on the paths that set
+  // a TTL (set/expire) and cleared as keys expire or are deleted; the sweep
+  // also self-heals any stale entry it finds.
+  private ttlKeys = new Set<string>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly maxKeys: number;
   private readonly maxMemoryBytes: number;
@@ -104,9 +110,21 @@ export class Store {
 
   private sweepExpired(): void {
     const now = Date.now();
-    for (const [key, entry] of this.data) {
-      if (this.isExpired(entry, now)) this.remove(key);
+    let evicted = 0;
+    // Walk only keys with a TTL set, not the whole keyspace.
+    for (const key of this.ttlKeys) {
+      const entry = this.data.get(key);
+      if (entry === undefined || entry.expiresAtMs === null) {
+        // Deleted or lost its TTL since it was indexed — drop the stale entry.
+        this.ttlKeys.delete(key);
+        continue;
+      }
+      if (this.isExpired(entry, now)) {
+        this.remove(key);
+        evicted++;
+      }
     }
+    if (evicted > 0) logger.debug('store.sweep', { evicted });
   }
 
   /**
@@ -132,13 +150,14 @@ export class Store {
     this.keyCountByType[entry.type]++;
   }
 
-  /** Deletes a key if present, keeping the byte estimate and per-type key counts exact. Returns whether it existed. */
+  /** Deletes a key if present, keeping the byte estimate, per-type key counts, and TTL index exact. Returns whether it existed. */
   private remove(key: string): boolean {
     const prev = this.data.get(key);
     if (prev === undefined) return false;
     this.memoryBytes -= estimateEntrySize(key, prev);
     this.keyCountByType[prev.type]--;
     this.data.delete(key);
+    this.ttlKeys.delete(key);
     return true;
   }
 
@@ -228,6 +247,7 @@ export class Store {
     }
 
     entry.expiresAtMs = atMs;
+    this.ttlKeys.add(key);
     return true;
   }
 
@@ -283,6 +303,10 @@ export class Store {
 
     if (!exists) this.ensureRoomForNewKey();
     this.put(key, { type: 'string', value, expiresAtMs });
+    // SET replaces any prior entry, so its TTL state is authoritative here:
+    // index it when it carries an expiry, drop any stale index entry otherwise.
+    if (expiresAtMs !== null) this.ttlKeys.add(key);
+    else this.ttlKeys.delete(key);
     return { set: true, oldValue };
   }
 
