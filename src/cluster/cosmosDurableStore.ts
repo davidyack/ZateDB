@@ -168,12 +168,20 @@ export class CosmosDurableStore implements DurableStore {
 
   async loadChangedSince(sinceMs: number): Promise<Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>> {
     const now = Date.now();
-    const iterator = this.keysContainer.items.query<{ key: string; entry: EntrySnapshot; updatedAtMs: number }>(
+    // Anchor the anti-entropy watermark on Cosmos's server-assigned `_ts`
+    // (epoch-seconds, stamped on every write, always index-covered) rather
+    // than the client-written `updatedAtMs`. `updatedAtMs` mixes every
+    // writer node's own clock, so a slow-clocked peer's write could sit
+    // below a faster node's watermark and be missed by the backstop forever.
+    // `_ts` is one server clock for all writers, which removes that skew.
+    // The caller keeps its watermark in ms; convert at the boundary.
+    const sinceSec = Math.floor(sinceMs / 1000);
+    const iterator = this.keysContainer.items.query<{ key: string; entry: EntrySnapshot; _ts: number }>(
       {
         query:
-          'SELECT c.key, c.entry, c.updatedAtMs FROM c WHERE c.updatedAtMs > @since AND (NOT IS_DEFINED(c.entry.expiresAtMs) OR IS_NULL(c.entry.expiresAtMs) OR c.entry.expiresAtMs > @now)',
+          'SELECT c.key, c.entry, c._ts FROM c WHERE c._ts > @sinceSec AND (NOT IS_DEFINED(c.entry.expiresAtMs) OR IS_NULL(c.entry.expiresAtMs) OR c.entry.expiresAtMs > @now)',
         parameters: [
-          { name: '@since', value: sinceMs },
+          { name: '@sinceSec', value: sinceSec },
           { name: '@now', value: now },
         ],
       },
@@ -182,7 +190,7 @@ export class CosmosDurableStore implements DurableStore {
     const results: Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }> = [];
     while (iterator.hasMoreResults()) {
       const { resources } = await iterator.fetchNext();
-      for (const r of resources) results.push(r);
+      for (const r of resources) results.push({ key: r.key, entry: r.entry, updatedAtMs: r._ts * 1000 });
     }
     return results;
   }

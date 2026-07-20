@@ -278,9 +278,11 @@ mode.
   diverging forever, which is the failure this replaces.
 - **Anti-entropy backstop**: every `ANTI_ENTROPY_INTERVAL_MS` (default
   5 min, matching the Service Bus message TTL) each node re-loads the
-  durable keys written since its last pass (`WHERE updatedAtMs > @since`)
-  and applies them locally. This is a cheap convergence safety net for
-  anything a node missed during a brief partition or receiver blip —
+  durable keys written since its last pass (`WHERE c._ts > @since`, riding
+  Cosmos's server-assigned write timestamp so one server clock — not every
+  writer node's own clock — defines the watermark, which a slow-clocked peer
+  can't slip beneath) and applies them locally. This is a cheap convergence
+  safety net for anything a node missed during a brief partition or blip —
   applying Cosmos's snapshot is safe under last-write-wins (Cosmos is the
   source of truth, and its field/member-patched documents already reflect
   the merged state), so a missed write converges on the next pass instead
