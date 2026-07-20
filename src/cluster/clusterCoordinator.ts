@@ -580,6 +580,13 @@ export class ClusterCoordinator {
     }
   }
 
+  /** Pending + in-flight replication work — the depth of the write-behind queue, for the saturation gauge. */
+  replicationQueueDepth(): number {
+    let pending = 0;
+    for (const queue of this.replicationQueue.values()) pending += queue.length;
+    return pending + this.inFlight.size;
+  }
+
   /** Live cluster members (heartbeat within nodeStaleMs) for the admin API. Empty in standalone mode. */
   async clusterSnapshot(): Promise<NodeSnapshot[]> {
     if (!this.haEnabled) return [];

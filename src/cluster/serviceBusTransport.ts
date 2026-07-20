@@ -1,6 +1,7 @@
 import type { ReplicationTransport } from './replicationTransport.js';
 import type { ReplicationEvent } from './types.js';
 import { errorMessage, logger } from '../logger.js';
+import { recordServiceBusPublish } from '../telemetry/clusterMetrics.js';
 
 export interface ServiceBusConfig {
   /** Full connection string (SAS-key auth). Takes precedence over fullyQualifiedNamespace. */
@@ -179,6 +180,7 @@ export class ServiceBusReplicationTransport implements ReplicationTransport {
   async publish(event: ReplicationEvent): Promise<void> {
     if (!this.sender) throw new Error('ServiceBusReplicationTransport.publish called before start()');
     await this.sender.sendMessages({ body: event, contentType: 'application/json' });
+    recordServiceBusPublish();
   }
 
   async stop(): Promise<void> {

@@ -1,6 +1,7 @@
 import type { DurableStore } from './durableStore.js';
 import type { EntrySnapshot, NodeSnapshot } from './types.js';
 import { errorMessage, logger } from '../logger.js';
+import { recordCosmosRequestUnits } from '../telemetry/clusterMetrics.js';
 
 export interface CosmosConfig {
   /** Full account connection string (key-based auth). Takes precedence over endpoint+AAD. */
@@ -19,7 +20,11 @@ export interface CosmosConfig {
  * optionalAzureModules.d.ts — and its real class instances satisfy this
  * shape structurally, so no cast is needed when it *is* installed.
  */
-interface CosmosFeedResponse<T> {
+/** Every Cosmos SDK response carries the RU charge of that call; capturing it is the basis of the cost metering. */
+interface CosmosCharged {
+  requestCharge?: number;
+}
+interface CosmosFeedResponse<T> extends CosmosCharged {
   resources: T[];
 }
 interface CosmosQueryIterator<T> {
@@ -33,9 +38,9 @@ interface CosmosPatchOperation {
   value?: unknown;
 }
 interface CosmosItemLike {
-  read<T = Record<string, unknown>>(): Promise<{ resource?: T }>;
-  delete(): Promise<unknown>;
-  patch(operations: CosmosPatchOperation[]): Promise<unknown>;
+  read<T = Record<string, unknown>>(): Promise<{ resource?: T } & CosmosCharged>;
+  delete(): Promise<CosmosCharged>;
+  patch(operations: CosmosPatchOperation[]): Promise<CosmosCharged>;
 }
 interface CosmosQueryParameter {
   name: string;
@@ -43,7 +48,7 @@ interface CosmosQueryParameter {
 }
 interface CosmosContainerLike {
   items: {
-    upsert(body: Record<string, unknown>): Promise<unknown>;
+    upsert(body: Record<string, unknown>): Promise<CosmosCharged>;
     query<T>(spec: { query: string; parameters?: CosmosQueryParameter[] }, options?: { maxItemCount?: number }): CosmosQueryIterator<T>;
   };
   item(id: string, partitionKey: string): CosmosItemLike;
@@ -160,8 +165,9 @@ export class CosmosDurableStore implements DurableStore {
     );
     const results: Array<{ key: string; entry: EntrySnapshot }> = [];
     while (iterator.hasMoreResults()) {
-      const { resources } = await iterator.fetchNext();
-      for (const r of resources) results.push(r);
+      const page = await iterator.fetchNext();
+      recordCosmosRequestUnits('query', page.requestCharge);
+      for (const r of page.resources) results.push(r);
     }
     return results;
   }
@@ -189,20 +195,22 @@ export class CosmosDurableStore implements DurableStore {
     );
     const results: Array<{ key: string; entry: EntrySnapshot; updatedAtMs: number }> = [];
     while (iterator.hasMoreResults()) {
-      const { resources } = await iterator.fetchNext();
-      for (const r of resources) results.push({ key: r.key, entry: r.entry, updatedAtMs: r._ts * 1000 });
+      const page = await iterator.fetchNext();
+      recordCosmosRequestUnits('query', page.requestCharge);
+      for (const r of page.resources) results.push({ key: r.key, entry: r.entry, updatedAtMs: r._ts * 1000 });
     }
     return results;
   }
 
   async putKey(key: string, entry: EntrySnapshot): Promise<void> {
-    await this.keysContainer.items.upsert({
+    const r = await this.keysContainer.items.upsert({
       id: toDocId(key),
       key,
       entry,
       updatedAtMs: Date.now(),
       ttl: cosmosTtlSeconds(entry.expiresAtMs),
     });
+    recordCosmosRequestUnits('upsert', r.requestCharge);
   }
 
   async putIncrement(key: string, originId: string, originTotal: number): Promise<void> {
@@ -211,10 +219,11 @@ export class CosmosDurableStore implements DurableStore {
     try {
       // Per-origin field set — commutative and idempotent across nodes, so
       // two nodes incrementing the same counter never clobber each other.
-      await this.keysContainer.item(id, key).patch([
+      const r = await this.keysContainer.item(id, key).patch([
         { op: 'set', path: `/entry/contributions/${escapeJsonPointerSegment(originId)}`, value: originTotal },
         { op: 'set', path: '/updatedAtMs', value: now },
       ]);
+      recordCosmosRequestUnits('patch', r.requestCharge);
     } catch (err) {
       if (!isNotFound(err) && !isBadRequest(err)) throw err;
       // The document is missing (404) or has no /entry/contributions parent
@@ -223,22 +232,28 @@ export class CosmosDurableStore implements DurableStore {
       // Same-origin increments are serialized upstream (per-key queue), so
       // this read-modify-write only races other origins in this rare
       // first-time window, resolving last-write-wins there.
-      const existing = isNotFound(err) ? undefined : (await this.keysContainer.item(id, key).read<{ entry?: { value?: string; contributions?: Record<string, number>; expiresAtMs?: number | null } }>()).resource;
-      const contributions: Record<string, number> = { ...(existing?.entry?.contributions ?? {}) };
-      const seed = existing?.entry?.value;
+      let existing: { value?: string; contributions?: Record<string, number>; expiresAtMs?: number | null } | undefined;
+      if (!isNotFound(err)) {
+        const read = await this.keysContainer.item(id, key).read<{ entry?: { value?: string; contributions?: Record<string, number>; expiresAtMs?: number | null } }>();
+        recordCosmosRequestUnits('query', read.requestCharge);
+        existing = read.resource?.entry;
+      }
+      const contributions: Record<string, number> = { ...(existing?.contributions ?? {}) };
+      const seed = existing?.value;
       if (contributions[''] === undefined && seed !== undefined && /^-?\d+$/.test(seed) && Number(seed) !== 0) {
         contributions[''] = Number(seed);
       }
       contributions[originId] = originTotal;
       let total = 0;
       for (const n of Object.values(contributions)) total += n;
-      await this.keysContainer.items.upsert({
+      const up = await this.keysContainer.items.upsert({
         id,
         key,
-        entry: { type: 'string', value: String(total), contributions, expiresAtMs: existing?.entry?.expiresAtMs ?? null },
+        entry: { type: 'string', value: String(total), contributions, expiresAtMs: existing?.expiresAtMs ?? null },
         updatedAtMs: now,
-        ttl: cosmosTtlSeconds(existing?.entry?.expiresAtMs ?? null),
+        ttl: cosmosTtlSeconds(existing?.expiresAtMs ?? null),
       });
+      recordCosmosRequestUnits('upsert', up.requestCharge);
     }
   }
 
@@ -249,10 +264,11 @@ export class CosmosDurableStore implements DurableStore {
     // than a whole-entry upsert. A 404 means the key isn't persisted here;
     // EXPIRE can't create a key, so there's nothing to patch — no fallback.
     try {
-      await this.keysContainer.item(toDocId(key), key).patch([
+      const r = await this.keysContainer.item(toDocId(key), key).patch([
         { op: 'set', path: '/entry/expiresAtMs', value: expiresAtMs },
         { op: 'set', path: '/ttl', value: cosmosTtlSeconds(expiresAtMs) },
       ]);
+      recordCosmosRequestUnits('patch', r.requestCharge);
     } catch (err) {
       if (!isNotFound(err)) throw err;
     }
@@ -260,7 +276,8 @@ export class CosmosDurableStore implements DurableStore {
 
   async deleteKey(key: string): Promise<void> {
     try {
-      await this.keysContainer.item(toDocId(key), key).delete();
+      const r = await this.keysContainer.item(toDocId(key), key).delete();
+      recordCosmosRequestUnits('delete', r.requestCharge);
     } catch (err) {
       if (!isNotFound(err)) throw err;
     }
@@ -345,10 +362,14 @@ export class CosmosDurableStore implements DurableStore {
         value: fieldOp.value,
       }));
       try {
-        await this.keysContainer.item(id, key).patch(patchOps);
+        const r = await this.keysContainer.item(id, key).patch(patchOps);
+        recordCosmosRequestUnits('patch', r.requestCharge);
       } catch (err) {
         if (isNotFound(err) && i === 0) {
-          if (buildFallbackDoc) await this.keysContainer.items.upsert(buildFallbackDoc());
+          if (buildFallbackDoc) {
+            const up = await this.keysContainer.items.upsert(buildFallbackDoc());
+            recordCosmosRequestUnits('upsert', up.requestCharge);
+          }
           return; // the fallback doc (or the no-op delete case) already covers every op in `ops`
         }
         throw err;
@@ -363,11 +384,14 @@ export class CosmosDurableStore implements DurableStore {
     // the nodes container (see infra/docs). ttl: -1 means "never expire".
     const doc: Record<string, unknown> = { id: toDocId(snapshot.nodeId), ...snapshot };
     if (ttlSeconds !== undefined) doc.ttl = ttlSeconds;
-    await this.nodesContainer.items.upsert(doc);
+    const r = await this.nodesContainer.items.upsert(doc);
+    recordCosmosRequestUnits('upsert', r.requestCharge);
   }
 
   async listNodeSnapshots(): Promise<NodeSnapshot[]> {
-    const { resources } = await this.nodesContainer.items.query<NodeSnapshot>({ query: 'SELECT * FROM c' }).fetchAll();
+    const page = await this.nodesContainer.items.query<NodeSnapshot>({ query: 'SELECT * FROM c' }).fetchAll();
+    recordCosmosRequestUnits('query', page.requestCharge);
+    const { resources } = page;
     return resources.map(({ nodeId, lastHeartbeatMs, connectionCount, keyCounts, commandsTotal, subscriptions }) => ({
       nodeId,
       lastHeartbeatMs,
@@ -380,7 +404,8 @@ export class CosmosDurableStore implements DurableStore {
 
   async deleteNodeSnapshot(nodeId: string): Promise<void> {
     try {
-      await this.nodesContainer.item(toDocId(nodeId), nodeId).delete();
+      const r = await this.nodesContainer.item(toDocId(nodeId), nodeId).delete();
+      recordCosmosRequestUnits('delete', r.requestCharge);
     } catch (err) {
       if (!isNotFound(err)) logger.warn('cluster.cosmos.delete_node_snapshot_failed', { nodeId, error: errorMessage(err) });
     }
