@@ -72,14 +72,25 @@ describe('SET expiry option validation', () => {
     expect(ctx.store.getKeyDetail('k')?.info.ttlMsRemaining).toBeNull();
   });
 
-  it('rejects an unsupported SET option loudly instead of silently overwriting', () => {
-    // Previously `SET k v NX` returned +OK and unconditionally overwrote —
-    // silently wrong lock/idempotency semantics. It must error, and must not
-    // have written the key.
-    const out = dispatch(ctx, ['SET', 'k', 'v', 'NX']);
+  it('rejects a still-unimplemented SET option loudly instead of silently overwriting', () => {
+    // NX/XX/GET/KEEPTTL are now implemented, but a real option we still don't
+    // support (e.g. EXAT) must error rather than be silently dropped — a
+    // silently-ignored option hands a caller the wrong semantics with no signal.
+    const out = dispatch(ctx, ['SET', 'k', 'v', 'EXAT', '9999999999']);
     expect(out.isError).toBe(true);
-    expect(errorText(out.frames[0])).toMatch(/unsupported option 'NX'/);
+    expect(errorText(out.frames[0])).toMatch(/unsupported option 'EXAT'/);
     expect(ctx.store.get('k')).toBeNull();
+  });
+
+  it('SET NX acquires only when absent; a contended NX write replies nil and does not overwrite', () => {
+    const first = dispatch(ctx, ['SET', 'lock', 'owner-a', 'NX']);
+    expect(first.isError).toBe(false);
+    expect(first.frames[0]).toEqual({ type: 'simple', value: 'OK' });
+
+    const second = dispatch(ctx, ['SET', 'lock', 'owner-b', 'NX']);
+    expect(second.isError).toBe(false);
+    expect(second.frames[0]).toEqual({ type: 'bulk', value: null }); // nil: not acquired
+    expect(ctx.store.get('lock')).toBe('owner-a'); // first holder retained
   });
 });
 

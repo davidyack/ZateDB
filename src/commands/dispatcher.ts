@@ -67,6 +67,8 @@ function spec(
 
 const singleKey = (args: string[]): string[] => (args.length > 0 ? [args[0]] : []);
 const allArgsAsKeys = (args: string[]): string[] => args;
+/** MSET args are [key value key value ...]; the mutated keys are the even positions. */
+const msetKeys = (args: string[]): string[] => args.filter((_, i) => i % 2 === 0);
 
 const COMMANDS: Record<string, CommandSpec> = {
   PING: spec(connectionCommands.ping, { allowedPreAuth: true, allowedInSubscriberMode: true }),
@@ -77,10 +79,16 @@ const COMMANDS: Record<string, CommandSpec> = {
 
   GET: spec(stringCommands.get),
   SET: spec(stringCommands.set, { mutatedKeys: singleKey }),
+  MGET: spec(stringCommands.mget),
+  MSET: spec(stringCommands.mset, { mutatedKeys: msetKeys }),
   DEL: spec(stringCommands.del, { mutatedKeys: allArgsAsKeys }),
+  EXISTS: spec(stringCommands.exists),
   INCR: spec(stringCommands.incr, { incrementReplication: true }),
   EXPIRE: spec(stringCommands.expire, { ttlReplication: true }),
   PEXPIRE: spec(stringCommands.pexpire, { ttlReplication: true }),
+  TTL: spec(stringCommands.ttl),
+  PTTL: spec(stringCommands.pttl),
+  SCAN: spec(stringCommands.scan),
 
   HSET: spec(hashCommands.hset, { fieldReplication: 'hash' }),
   HDEL: spec(hashCommands.hdel, { fieldReplication: 'hash' }),

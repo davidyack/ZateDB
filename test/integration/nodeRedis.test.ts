@@ -102,6 +102,67 @@ describe('node-redis v5 client against BackendCache', () => {
     expect(await client.zCount('zs', '-inf', '+inf')).toBe(2);
   });
 
+  it('MSET/MGET round-trip multiple keys, with nil for missing ones', async () => {
+    await client.mSet([['m1', 'v1'], ['m2', 'v2']]);
+    expect(await client.mGet(['m1', 'm2', 'm-missing'])).toEqual(['v1', 'v2', null]);
+  });
+
+  it('EXISTS counts how many of the given keys are present', async () => {
+    await client.set('ex1', 'v');
+    await client.set('ex2', 'v');
+    await client.del('ex-missing');
+    expect(await client.exists(['ex1', 'ex2', 'ex-missing'])).toBe(2);
+  });
+
+  it('TTL and PTTL report remaining lifetime, -1 without a TTL, -2 when missing', async () => {
+    await client.set('t1', 'v', { EX: 100 });
+    expect(await client.ttl('t1')).toBeGreaterThan(90);
+    expect(await client.pTTL('t1')).toBeGreaterThan(90_000);
+    await client.set('t2', 'v');
+    expect(await client.ttl('t2')).toBe(-1);
+    await client.del('t3');
+    expect(await client.ttl('t3')).toBe(-2);
+  });
+
+  it('SET NX/PX behaves as a distributed lock: only the first holder wins', async () => {
+    await client.del('lock:job');
+    const first = await client.set('lock:job', 'replica-a', { NX: true, PX: 30_000 });
+    const second = await client.set('lock:job', 'replica-b', { NX: true, PX: 30_000 });
+    expect(first).toBe('OK'); // acquired
+    expect(second).toBeNull(); // contended — lock already held
+    expect(await client.get('lock:job')).toBe('replica-a');
+    expect(await client.pTTL('lock:job')).toBeGreaterThan(0); // PX applied
+  });
+
+  it('SET KEEPTTL preserves a TTL across an overwrite; SET GET returns the prior value', async () => {
+    await client.set('kt', 'v1', { PX: 30_000 });
+    await client.set('kt', 'v2', { KEEPTTL: true });
+    expect(await client.pTTL('kt')).toBeGreaterThan(0);
+    expect(await client.set('kt', 'v3', { GET: true })).toBe('v2'); // old value returned
+  });
+
+  it('SCAN with MATCH enumerates keys by prefix — the connect-redis clear() pattern', async () => {
+    await client.mSet([
+      ['sess:a', '1'],
+      ['sess:b', '2'],
+      ['sess:c', '3'],
+      ['other:x', '4'],
+    ]);
+
+    // Collect every matching key the way a session store's clear() does.
+    const found: string[] = [];
+    for await (const key of client.scanIterator({ MATCH: 'sess:*' })) {
+      // node-redis v5 yields a key per iteration (string or string[] batch).
+      if (Array.isArray(key)) found.push(...key);
+      else found.push(key);
+    }
+    expect(new Set(found)).toEqual(new Set(['sess:a', 'sess:b', 'sess:c']));
+
+    if (found.length > 0) await client.del(found);
+    expect(await client.exists(['sess:a', 'sess:b', 'sess:c'])).toBe(0);
+    expect(await client.get('other:x')).toBe('4'); // non-matching key untouched
+  });
+
   it('a command against the wrong key type returns a WRONGTYPE error', async () => {
     await client.del('wrongtype');
     await client.set('wrongtype', 'a string');

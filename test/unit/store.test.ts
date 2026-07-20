@@ -41,6 +41,46 @@ describe('Store strings', () => {
     expect(() => store.get('h')).toThrow(WrongTypeError);
     expect(() => store.incr('h')).toThrow(WrongTypeError);
   });
+
+  it('SET NX only writes when the key is absent (lock-acquire semantics)', () => {
+    expect(store.set('lock', 'owner-a', { nx: true })).toEqual({ set: true, oldValue: null });
+    expect(store.set('lock', 'owner-b', { nx: true })).toEqual({ set: false, oldValue: null });
+    expect(store.get('lock')).toBe('owner-a'); // first writer keeps the lock
+  });
+
+  it('SET XX only writes when the key already exists', () => {
+    expect(store.set('k', 'v', { xx: true })).toEqual({ set: false, oldValue: null });
+    store.set('k', 'v1');
+    expect(store.set('k', 'v2', { xx: true }).set).toBe(true);
+    expect(store.get('k')).toBe('v2');
+  });
+
+  it('SET GET returns the prior value and errors on a non-string key', () => {
+    expect(store.set('k', 'new', { get: true })).toEqual({ set: true, oldValue: null });
+    expect(store.set('k', 'newer', { get: true })).toEqual({ set: true, oldValue: 'new' });
+    store.hset('h', [['f', 'v']]);
+    expect(() => store.set('h', 'x', { get: true })).toThrow(WrongTypeError);
+  });
+
+  it('MGET returns nil for missing and non-string keys, values otherwise', () => {
+    store.set('s', 'v');
+    store.hset('h', [['f', 'v']]);
+    expect(store.mget(['s', 'missing', 'h'])).toEqual(['v', null, null]);
+  });
+
+  it('MSET writes every pair and clears any prior TTL', () => {
+    store.set('a', 'old', { pxMs: 10_000 });
+    store.mset([['a', '1'], ['b', '2']]);
+    expect(store.get('a')).toBe('1');
+    expect(store.get('b')).toBe('2');
+    expect(store.pttlMs('a')).toBe(-1); // TTL cleared by MSET
+  });
+
+  it('EXISTS counts present keys including duplicates', () => {
+    store.set('a', '1');
+    store.set('b', '2');
+    expect(store.existsCount(['a', 'a', 'b', 'missing'])).toBe(3);
+  });
 });
 
 describe('Store TTL', () => {
@@ -86,6 +126,65 @@ describe('Store TTL', () => {
     vi.advanceTimersByTime(120);
     expect(sweeping.stats().keyCounts.string).toBe(0);
     sweeping.close();
+  });
+
+  it('pttlMs reports -2 (missing), -1 (no TTL), then the remaining lifetime', () => {
+    expect(store.pttlMs('missing')).toBe(-2);
+    store.set('k', 'v');
+    expect(store.pttlMs('k')).toBe(-1);
+    store.set('k', 'v', { pxMs: 5000 });
+    expect(store.pttlMs('k')).toBe(5000);
+    vi.advanceTimersByTime(1000);
+    expect(store.pttlMs('k')).toBe(4000);
+  });
+
+  it('SET KEEPTTL preserves the existing TTL while overwriting the value', () => {
+    store.set('k', 'v1', { pxMs: 5000 });
+    store.set('k', 'v2', { keepTtl: true });
+    expect(store.get('k')).toBe('v2');
+    expect(store.pttlMs('k')).toBe(5000); // TTL survived the overwrite
+    // A plain SET (no KEEPTTL) clears the TTL.
+    store.set('k', 'v3');
+    expect(store.pttlMs('k')).toBe(-1);
+  });
+});
+
+describe('Store SCAN', () => {
+  let store: Store;
+  beforeEach(() => {
+    store = new Store(0);
+  });
+  afterEach(() => store.close());
+
+  it('returns all keys with no filter', () => {
+    store.set('a', '1');
+    store.set('b', '2');
+    store.hset('h', [['f', 'v']]);
+    expect(new Set(store.scanKeys(null, null))).toEqual(new Set(['a', 'b', 'h']));
+  });
+
+  it('MATCH filters by glob and TYPE filters by kind', () => {
+    store.set('session:1', 'v');
+    store.set('session:2', 'v');
+    store.set('other', 'v');
+    store.hset('session:h', [['f', 'v']]);
+    expect(new Set(store.scanKeys(/^session:.*$/, null))).toEqual(
+      new Set(['session:1', 'session:2', 'session:h']),
+    );
+    expect(new Set(store.scanKeys(/^session:.*$/, 'string'))).toEqual(
+      new Set(['session:1', 'session:2']),
+    );
+  });
+
+  it('skips expired keys', () => {
+    vi.useFakeTimers();
+    const s = new Store(0);
+    s.set('live', 'v');
+    s.set('dead', 'v', { pxMs: 10 });
+    vi.advanceTimersByTime(50);
+    expect(s.scanKeys(null, null)).toEqual(['live']);
+    s.close();
+    vi.useRealTimers();
   });
 });
 

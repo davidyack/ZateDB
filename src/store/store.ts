@@ -166,6 +166,47 @@ export class Store {
     return this.getLive(key) !== undefined;
   }
 
+  /** EXISTS key [key ...]: counts each present key, including duplicates (matching Redis). */
+  existsCount(keys: string[]): number {
+    let count = 0;
+    for (const key of keys) {
+      if (this.getLive(key) !== undefined) count++;
+    }
+    return count;
+  }
+
+  /**
+   * PTTL in milliseconds: -2 if the key does not exist, -1 if it exists but
+   * has no TTL, otherwise the remaining lifetime (never negative). TTL derives
+   * its seconds value from this.
+   */
+  pttlMs(key: string): number {
+    const entry = this.getLive(key);
+    if (entry === undefined) return -2;
+    if (entry.expiresAtMs === null) return -1;
+    return Math.max(0, entry.expiresAtMs - Date.now());
+  }
+
+  /**
+   * SCAN over the whole keyspace. COUNT is only a hint in Redis and a full
+   * iteration may legally complete in one step, so this returns every live
+   * key matching `match` (a Redis glob, or all keys when omitted) in a single
+   * page — the caller sees a terminating cursor and stops. Keeping it
+   * single-page sidesteps the skip-on-delete hazard an offset cursor has when
+   * a caller deletes keys mid-scan (e.g. connect-redis's clear()).
+   */
+  scanKeys(match: RegExp | null, type: EntryTypeName | null): string[] {
+    const now = Date.now();
+    const keys: string[] = [];
+    for (const [key, entry] of this.data) {
+      if (this.isExpired(entry, now)) continue;
+      if (type !== null && entry.type !== type) continue;
+      if (match !== null && !match.test(key)) continue;
+      keys.push(key);
+    }
+    return keys;
+  }
+
   expire(key: string, seconds: number, flag?: ExpireFlag): boolean {
     return this.setExpiry(key, Date.now() + seconds * 1000, flag);
   }
@@ -197,14 +238,68 @@ export class Store {
     return entry ? entry.value : null;
   }
 
-  set(key: string, value: string, opts?: { exSeconds?: number; pxMs?: number }): void {
-    const expiresAtMs = opts?.pxMs !== undefined
-      ? Date.now() + opts.pxMs
-      : opts?.exSeconds !== undefined
-        ? Date.now() + opts.exSeconds * 1000
-        : null;
-    if (this.getLive(key) === undefined) this.ensureRoomForNewKey();
+  /**
+   * SET with the full option surface used by locks and caches: NX/XX
+   * conditions, KEEPTTL, and GET. Returns whether the write happened and the
+   * previous string value (for the GET option). A GET against a non-string
+   * key throws WrongTypeError, matching Redis — an NX/XX no-op still surfaces
+   * the old value so `SET k v NX GET` reports the winner of a lock race.
+   * A write that creates a brand-new key still passes the OOM admission guard.
+   */
+  set(
+    key: string,
+    value: string,
+    opts?: {
+      exSeconds?: number;
+      pxMs?: number;
+      keepTtl?: boolean;
+      nx?: boolean;
+      xx?: boolean;
+      get?: boolean;
+    },
+  ): { set: boolean; oldValue: string | null } {
+    const existing = this.getLive(key);
+
+    let oldValue: string | null = null;
+    if (opts?.get) {
+      if (existing !== undefined && existing.type !== 'string') throw new WrongTypeError();
+      oldValue = existing !== undefined ? (existing as StringEntry).value : null;
+    }
+
+    const exists = existing !== undefined;
+    if (opts?.nx && exists) return { set: false, oldValue };
+    if (opts?.xx && !exists) return { set: false, oldValue };
+
+    let expiresAtMs: number | null;
+    if (opts?.keepTtl) {
+      expiresAtMs = existing !== undefined ? existing.expiresAtMs : null;
+    } else if (opts?.pxMs !== undefined) {
+      expiresAtMs = Date.now() + opts.pxMs;
+    } else if (opts?.exSeconds !== undefined) {
+      expiresAtMs = Date.now() + opts.exSeconds * 1000;
+    } else {
+      expiresAtMs = null;
+    }
+
+    if (!exists) this.ensureRoomForNewKey();
     this.put(key, { type: 'string', value, expiresAtMs });
+    return { set: true, oldValue };
+  }
+
+  /** MGET: nil for every missing or non-string key (MGET never errors on type). */
+  mget(keys: string[]): (string | null)[] {
+    return keys.map((key) => {
+      const entry = this.getLive(key);
+      return entry !== undefined && entry.type === 'string' ? entry.value : null;
+    });
+  }
+
+  /** MSET: unconditional multi-key set; each write clears any prior TTL, as in Redis. New keys pass the OOM guard. */
+  mset(pairs: Array<[string, string]>): void {
+    for (const [key, value] of pairs) {
+      if (this.getLive(key) === undefined) this.ensureRoomForNewKey();
+      this.put(key, { type: 'string', value, expiresAtMs: null });
+    }
   }
 
   incr(key: string, originId: string = LOCAL_ORIGIN): number {

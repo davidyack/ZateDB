@@ -48,3 +48,11 @@ export function unsupportedOptionError(command: string, option: string): RespVal
 export function maxClientsError(): RespValue {
   return error('ERR max number of clients reached');
 }
+
+export function syntaxError(): RespValue {
+  return error('ERR syntax error');
+}
+
+export function invalidCursorError(): RespValue {
+  return error('ERR invalid cursor');
+}
