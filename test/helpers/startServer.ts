@@ -22,7 +22,7 @@ export interface HaOverride {
 }
 
 /**
- * Boots a real BackendCache RESP server on an ephemeral loopback port, for
+ * Boots a real ZateDB RESP server on an ephemeral loopback port, for
  * integration tests that connect with the actual client libraries the
  * consuming app uses (node-redis, rate-limit-redis, @socket.io/redis-adapter).
  * Runs standalone (HA disabled) by default; pass `ha` to exercise
@@ -45,7 +45,7 @@ export async function startTestServer(overrides: Partial<ServerConfig> = {}, ha?
     maxBulkBytes: 0,
     maxBufferBytes: 0,
     outboundHighWaterMarkBytes: 0,
-    otelServiceName: 'backendcache-test',
+    otelServiceName: 'zatedb-test',
     ...overrides,
   };
 

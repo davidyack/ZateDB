@@ -49,11 +49,11 @@ which keep `tsc`/build from depending on whether they're present).
 One span per command execution — not per connection, since a Socket.IO
 adapter's subscriber connection can live for the process's entire
 lifetime, and a span spanning hours is an anti-pattern. Span name:
-`backendcache.command.<COMMAND>` (e.g. `backendcache.command.ZCOUNT`).
+`zatedb.command.<COMMAND>` (e.g. `zatedb.command.ZCOUNT`).
 
-Attributes: `db.system = "backendcache"`, `db.operation = <COMMAND>`,
-`backendcache.connection_id`, `backendcache.result = success|error`,
-`backendcache.key` — a key is redacted (an 8-char prefix plus a short
+Attributes: `db.system = "zatedb"`, `db.operation = <COMMAND>`,
+`zatedb.connection_id`, `zatedb.result = success|error`,
+`zatedb.key` — a key is redacted (an 8-char prefix plus a short
 hash suffix) before it lands in a span attribute, since a key name can
 embed identifying data.
 
@@ -74,27 +74,27 @@ anti-pattern either way:
   nothing to attach to.
 
 **Known limitation**: RESP has no header/metadata channel, so there's no
-way to propagate a calling request's `traceparent` into a BackendCache
-command span — BackendCache spans are self-contained, not children of the
+way to propagate a calling request's `traceparent` into a ZateDB
+command span — ZateDB spans are self-contained, not children of the
 originating request's trace. This is an accepted gap.
 
 ### Metrics
 
 | Metric | Type | Dimensions |
 |---|---|---|
-| `backendcache.commands.total` | Counter | `command`, `result` |
-| `backendcache.commands.duration_ms` | Histogram | `command` |
-| `backendcache.connections.active` | UpDownCounter | — |
-| `backendcache.pubsub.subscriptions.active` | UpDownCounter | `type` (channel/pattern) |
-| `backendcache.admin.actions.total` | Counter | `action`, `result` |
-| `backendcache.keys.count` | Observable gauge | `type` (string/hash/sortedset) — this node's live in-memory key count, sampled on export |
-| `backendcache.cosmos.request_units` | Counter | `operation` (upsert/patch/query/delete) — Cosmos RU consumed, the dominant HA cost. Slope over time is the cost signal for capacity-mode/threshold decisions |
-| `backendcache.servicebus.publishes` | Counter | — replication events published to the topic |
-| `backendcache.replication.queue_depth` | Observable gauge | pending + in-flight replication tasks — where write back-pressure accumulates under bursts or a slow Cosmos |
-| `backendcache.cluster.ha_enabled` | Observable gauge | — `1` when HA replication (Cosmos+Service Bus) is active, `0` when standalone. Alert on `0` joined with the platform's replica-count metric: >1 replica while this reads `0` is split-brain (a node can't detect siblings without the shared backend, so this is the in-process half of that signal) |
-| `backendcache.scripts.evalsha.total` | Counter | `result` (`hit`/`noscript`) — a `noscript` spike means the per-node in-memory script cache was lost (restart) or an `EVALSHA` hit a node that never saw the `SCRIPT LOAD`; clients recover via `EVAL` |
-| `backendcache.scripts.errors.total` | Counter | `phase` (`compile`/`runtime`) |
-| `backendcache.scripts.cache.size` | Observable gauge | — Lua scripts held in this node's SHA1 cache |
+| `zatedb.commands.total` | Counter | `command`, `result` |
+| `zatedb.commands.duration_ms` | Histogram | `command` |
+| `zatedb.connections.active` | UpDownCounter | — |
+| `zatedb.pubsub.subscriptions.active` | UpDownCounter | `type` (channel/pattern) |
+| `zatedb.admin.actions.total` | Counter | `action`, `result` |
+| `zatedb.keys.count` | Observable gauge | `type` (string/hash/sortedset) — this node's live in-memory key count, sampled on export |
+| `zatedb.cosmos.request_units` | Counter | `operation` (upsert/patch/query/delete) — Cosmos RU consumed, the dominant HA cost. Slope over time is the cost signal for capacity-mode/threshold decisions |
+| `zatedb.servicebus.publishes` | Counter | — replication events published to the topic |
+| `zatedb.replication.queue_depth` | Observable gauge | pending + in-flight replication tasks — where write back-pressure accumulates under bursts or a slow Cosmos |
+| `zatedb.cluster.ha_enabled` | Observable gauge | — `1` when HA replication (Cosmos+Service Bus) is active, `0` when standalone. Alert on `0` joined with the platform's replica-count metric: >1 replica while this reads `0` is split-brain (a node can't detect siblings without the shared backend, so this is the in-process half of that signal) |
+| `zatedb.scripts.evalsha.total` | Counter | `result` (`hit`/`noscript`) — a `noscript` spike means the per-node in-memory script cache was lost (restart) or an `EVALSHA` hit a node that never saw the `SCRIPT LOAD`; clients recover via `EVAL` |
+| `zatedb.scripts.errors.total` | Counter | `phase` (`compile`/`runtime`) |
+| `zatedb.scripts.cache.size` | Observable gauge | — Lua scripts held in this node's SHA1 cache |
 
 ### Prometheus `/metrics` endpoint
 
@@ -109,22 +109,22 @@ an OTLP collector.
 It is deliberately unauthenticated (like the health probes) and cheap:
 every value is an already-tracked O(1) aggregate — no keyspace walk — and
 no key names or values are ever exposed, only counts. Exposed families
-(all prefixed `backendcache_`, rendered in
+(all prefixed `zatedb_`, rendered in
 [`src/telemetry/prometheus.ts`](../src/telemetry/prometheus.ts)):
 
 | Metric | Type | Labels |
 |---|---|---|
-| `backendcache_up` | gauge | — |
-| `backendcache_uptime_seconds` | gauge | — |
-| `backendcache_connected_clients` | gauge | — |
-| `backendcache_commands_processed_total` | counter | — |
-| `backendcache_keys` | gauge | `type` (string/hash/sortedset) |
-| `backendcache_memory_estimate_bytes` | gauge | — |
-| `backendcache_pubsub_channels` / `_patterns` | gauge | — |
-| `backendcache_pubsub_channel_subscriptions` / `_pattern_subscriptions` | gauge | — |
-| `backendcache_ha_enabled` | gauge | — (1 in HA, 0 standalone) |
-| `backendcache_hydrated` | gauge | — |
-| `backendcache_build_info` | gauge | `version`, `node_id` (value always 1) |
+| `zatedb_up` | gauge | — |
+| `zatedb_uptime_seconds` | gauge | — |
+| `zatedb_connected_clients` | gauge | — |
+| `zatedb_commands_processed_total` | counter | — |
+| `zatedb_keys` | gauge | `type` (string/hash/sortedset) |
+| `zatedb_memory_estimate_bytes` | gauge | — |
+| `zatedb_pubsub_channels` / `_patterns` | gauge | — |
+| `zatedb_pubsub_channel_subscriptions` / `_pattern_subscriptions` | gauge | — |
+| `zatedb_ha_enabled` | gauge | — (1 in HA, 0 standalone) |
+| `zatedb_hydrated` | gauge | — |
+| `zatedb_build_info` | gauge | `version`, `node_id` (value always 1) |
 
 ### Logs
 
@@ -132,5 +132,5 @@ Structured JSON logs to stdout/stderr
 ([`src/logger.ts`](../src/logger.ts)) for connection open/close, command
 errors, TTL sweep activity, every admin action, and cluster lifecycle
 events (hydration, heartbeat failures, replication failures, Service Bus
-subscription setup/teardown). Kept lightweight — BackendCache is
+subscription setup/teardown). Kept lightweight — ZateDB is
 infrastructure, not an agent with its own observability conventions.

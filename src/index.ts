@@ -35,13 +35,13 @@ async function main(): Promise<void> {
   // open to anyone who can reach the port. Acceptable behind strict network
   // isolation, but never silent — especially in production.
   if (!config.authPassword) {
-    logger.warn('backendcache.auth_disabled', {
+    logger.warn('zatedb.auth_disabled', {
       detail: 'REDIS_AUTH_PASSWORD is unset — RESP clients can connect without AUTH',
       production: process.env.NODE_ENV === 'production',
     });
   }
   if (!config.adminToken) {
-    logger.warn('backendcache.admin_auth_disabled', {
+    logger.warn('zatedb.admin_auth_disabled', {
       detail: 'ADMIN_TOKEN is unset — the admin API (key read/delete) is unauthenticated',
       production: process.env.NODE_ENV === 'production',
     });
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
   registerClusterHealthGauge(() => cluster.haEnabled);
   registerScriptCacheSizeGauge(() => scriptCache.size());
 
-  logger.info('backendcache.started', {
+  logger.info('zatedb.started', {
     respPort: config.respPort,
     healthPort: config.healthPort,
     adminPort: config.adminPort,
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    logger.info('backendcache.shutting_down', { signal });
+    logger.info('zatedb.shutting_down', { signal });
     // Hard deadline: graceful shutdown awaits cluster.stop(), which makes
     // network calls to Cosmos DB / Service Bus (drain, subscription delete,
     // client close). On the crash path (uncaughtException / unhandledRejection)
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     // orchestrator can restart. This timer force-exits regardless; unref() so
     // it never itself keeps the process alive if the clean path wins the race.
     const hardExit = setTimeout(() => {
-      logger.error('backendcache.shutdown_timeout', { signal, limitMs: config.shutdownHardLimitMs });
+      logger.error('zatedb.shutdown_timeout', { signal, limitMs: config.shutdownHardLimitMs });
       process.exit(exitCode);
     }, config.shutdownHardLimitMs);
     hardExit.unref?.();
@@ -133,9 +133,9 @@ async function main(): Promise<void> {
       await cluster.stop();
       store.close();
       await telemetry.shutdown();
-      logger.info('backendcache.stopped', {});
+      logger.info('zatedb.stopped', {});
     } catch (err) {
-      logger.error('backendcache.shutdown_error', { error: err instanceof Error ? err.message : String(err) });
+      logger.error('zatedb.shutdown_error', { error: err instanceof Error ? err.message : String(err) });
     } finally {
       clearTimeout(hardExit);
     }
@@ -148,7 +148,7 @@ async function main(): Promise<void> {
   // re-creates its subscription and re-hydrates. Staying up would serve a
   // silently-diverging keyspace.
   onFatalReplication = (err) => {
-    logger.error('backendcache.replication_fatal', { error: err.message });
+    logger.error('zatedb.replication_fatal', { error: err.message });
     void shutdown('replicationFatal', 1);
   };
 
@@ -159,16 +159,16 @@ async function main(): Promise<void> {
   // shouldn't leave a half-dead process untraced. Log, attempt a graceful
   // drain, then exit non-zero so the orchestrator restarts a clean instance.
   process.on('uncaughtException', (err) => {
-    logger.error('backendcache.uncaught_exception', { error: err instanceof Error ? err.stack ?? err.message : String(err) });
+    logger.error('zatedb.uncaught_exception', { error: err instanceof Error ? err.stack ?? err.message : String(err) });
     void shutdown('uncaughtException', 1);
   });
   process.on('unhandledRejection', (reason) => {
-    logger.error('backendcache.unhandled_rejection', { error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) });
+    logger.error('zatedb.unhandled_rejection', { error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) });
     void shutdown('unhandledRejection', 1);
   });
 }
 
 main().catch((err) => {
-  logger.error('backendcache.fatal', { error: err instanceof Error ? err.message : String(err) });
+  logger.error('zatedb.fatal', { error: err instanceof Error ? err.message : String(err) });
   process.exit(1);
 });

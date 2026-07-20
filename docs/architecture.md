@@ -8,7 +8,7 @@ the consistency model that implies), see
 
 ```
                     ┌─────────────────────────────┐
-                    │        BackendCache            │
+                    │        ZateDB            │
   client library ──▶│  TCP listener (RESP) :6379       │
                     │  Connection manager (per-conn      │
                     │   parser, pub/sub mode switch)      │

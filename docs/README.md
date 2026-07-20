@@ -1,4 +1,4 @@
-# BackendCache docs
+# ZateDB docs
 
 Deeper reference material than the top-level [README](../README.md), which
 stays focused on a quickstart. Start here if you need the "why" behind a

@@ -43,38 +43,38 @@ export function renderPrometheus(s: MetricsSnapshot): string {
     }
   };
 
-  metric('backendcache_up', 'gauge', 'Always 1 for a process that is serving this endpoint', [{ value: 1 }]);
-  metric('backendcache_uptime_seconds', 'gauge', 'Seconds since process start', [{ value: s.uptimeSeconds }]);
-  metric('backendcache_connected_clients', 'gauge', 'Currently open RESP connections', [{ value: s.connectedClients }]);
-  metric('backendcache_commands_processed_total', 'counter', 'Total RESP commands processed since start', [
+  metric('zatedb_up', 'gauge', 'Always 1 for a process that is serving this endpoint', [{ value: 1 }]);
+  metric('zatedb_uptime_seconds', 'gauge', 'Seconds since process start', [{ value: s.uptimeSeconds }]);
+  metric('zatedb_connected_clients', 'gauge', 'Currently open RESP connections', [{ value: s.connectedClients }]);
+  metric('zatedb_commands_processed_total', 'counter', 'Total RESP commands processed since start', [
     { value: s.commandsProcessed },
   ]);
   metric(
-    'backendcache_keys',
+    'zatedb_keys',
     'gauge',
     'Live keys held in this node\'s in-memory store, by type',
     Object.entries(s.keyCounts).map(([type, count]) => ({ labels: { type }, value: count })),
   );
-  metric('backendcache_memory_estimate_bytes', 'gauge', 'Estimated in-memory keyspace size in bytes', [
+  metric('zatedb_memory_estimate_bytes', 'gauge', 'Estimated in-memory keyspace size in bytes', [
     { value: s.memoryBytes },
   ]);
-  metric('backendcache_pubsub_channels', 'gauge', 'Channels with at least one subscriber', [
+  metric('zatedb_pubsub_channels', 'gauge', 'Channels with at least one subscriber', [
     { value: s.pubsub.channelCount },
   ]);
-  metric('backendcache_pubsub_patterns', 'gauge', 'Distinct subscribed patterns', [{ value: s.pubsub.patternCount }]);
-  metric('backendcache_pubsub_channel_subscriptions', 'gauge', 'Total channel subscriptions across all clients', [
+  metric('zatedb_pubsub_patterns', 'gauge', 'Distinct subscribed patterns', [{ value: s.pubsub.patternCount }]);
+  metric('zatedb_pubsub_channel_subscriptions', 'gauge', 'Total channel subscriptions across all clients', [
     { value: s.pubsub.channelSubscriptions },
   ]);
-  metric('backendcache_pubsub_pattern_subscriptions', 'gauge', 'Total pattern subscriptions across all clients', [
+  metric('zatedb_pubsub_pattern_subscriptions', 'gauge', 'Total pattern subscriptions across all clients', [
     { value: s.pubsub.patternSubscriptions },
   ]);
-  metric('backendcache_ha_enabled', 'gauge', 'Whether HA/cluster replication is enabled (1) or standalone (0)', [
+  metric('zatedb_ha_enabled', 'gauge', 'Whether HA/cluster replication is enabled (1) or standalone (0)', [
     { value: s.haEnabled ? 1 : 0 },
   ]);
-  metric('backendcache_hydrated', 'gauge', 'Whether this node has finished hydrating from the durable store', [
+  metric('zatedb_hydrated', 'gauge', 'Whether this node has finished hydrating from the durable store', [
     { value: s.hydrated ? 1 : 0 },
   ]);
-  metric('backendcache_build_info', 'gauge', 'Build/identity labels; value is always 1', [
+  metric('zatedb_build_info', 'gauge', 'Build/identity labels; value is always 1', [
     { labels: { version: s.version, node_id: s.nodeId }, value: 1 },
   ]);
 

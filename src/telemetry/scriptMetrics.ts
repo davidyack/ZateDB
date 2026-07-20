@@ -1,16 +1,16 @@
 import { metrics } from '@opentelemetry/api';
 
-const meter = metrics.getMeter('backendcache');
+const meter = metrics.getMeter('zatedb');
 
 /**
  * Metrics for the Lua scripting layer. `EVAL`/`EVALSHA` already get generic
  * command counters/latency via traceCommand; these capture the script-specific
  * signals that generic command metrics can't express.
  */
-const evalshaTotal = meter.createCounter('backendcache.scripts.evalsha.total', {
+const evalshaTotal = meter.createCounter('zatedb.scripts.evalsha.total', {
   description: 'EVALSHA calls, dimensioned by whether the SHA was cached (hit) or missing (noscript)',
 });
-const scriptErrorsTotal = meter.createCounter('backendcache.scripts.errors.total', {
+const scriptErrorsTotal = meter.createCounter('zatedb.scripts.errors.total', {
   description: 'Script failures, dimensioned by phase (compile/runtime)',
 });
 
@@ -34,7 +34,7 @@ let cacheSizeGaugeRegistered = false;
 export function registerScriptCacheSizeGauge(getSize: () => number): void {
   if (cacheSizeGaugeRegistered) return;
   cacheSizeGaugeRegistered = true;
-  const gauge = meter.createObservableGauge('backendcache.scripts.cache.size', {
+  const gauge = meter.createObservableGauge('zatedb.scripts.cache.size', {
     description: 'Number of Lua scripts held in this node\'s SHA1 script cache',
   });
   gauge.addCallback((result) => result.observe(getSize()));

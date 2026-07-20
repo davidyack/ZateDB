@@ -6,7 +6,7 @@ on:
 
 env:
   REGISTRY: dydemoacr.azurecr.io
-  IMAGE: backendcache
+  IMAGE: zatedb
 
 jobs:
   build-and-push:

@@ -12,12 +12,12 @@ import type { TestServer } from '../helpers/startServer.js';
 /**
  * The payoff of Lua/EVAL support: rate-limit-redis's DEFAULT store — the one
  * that failed on the diagnostics page with `ERR unknown command 'SCRIPT'` —
- * now works against BackendCache with no workaround store. This wires the
+ * now works against ZateDB with no workaround store. This wires the
  * unmodified `RedisStore` (which does SCRIPT LOAD + EVALSHA under the hood)
  * into a real express-rate-limit middleware over a real node-redis client and
- * a real BackendCache instance, and confirms limiting works end to end.
+ * a real ZateDB instance, and confirms limiting works end to end.
  */
-describe('rate-limit-redis DEFAULT (Lua/EVALSHA) store against BackendCache', () => {
+describe('rate-limit-redis DEFAULT (Lua/EVALSHA) store against ZateDB', () => {
   let server: TestServer;
   let client: RedisClientType;
   let app: Express;
@@ -75,7 +75,7 @@ describe('rate-limit-redis DEFAULT (Lua/EVALSHA) store against BackendCache', ()
     expect(blocked.status).toBe(429);
   });
 
-  it('the limiter counter lands in BackendCache under its prefix', async () => {
+  it('the limiter counter lands in ZateDB under its prefix', async () => {
     const { keys } = server.store.listKeys('default-rl:', 100, 0);
     expect(keys.length).toBeGreaterThanOrEqual(1);
     expect(keys[0].type).toBe('string');

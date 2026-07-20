@@ -47,12 +47,12 @@ describe('GET /metrics (Prometheus exposition)', () => {
 
     const body = await res.text();
     // Every metric family carries HELP and TYPE lines.
-    expect(body).toContain('# HELP backendcache_up ');
-    expect(body).toContain('# TYPE backendcache_up gauge');
-    expect(body).toMatch(/^backendcache_up 1$/m);
-    expect(body).toContain('# TYPE backendcache_commands_processed_total counter');
-    expect(body).toContain('backendcache_ha_enabled 0');
-    expect(body).toMatch(/backendcache_build_info\{version="1\.0\.0",node_id="test-node"\} 1/);
+    expect(body).toContain('# HELP zatedb_up ');
+    expect(body).toContain('# TYPE zatedb_up gauge');
+    expect(body).toMatch(/^zatedb_up 1$/m);
+    expect(body).toContain('# TYPE zatedb_commands_processed_total counter');
+    expect(body).toContain('zatedb_ha_enabled 0');
+    expect(body).toMatch(/zatedb_build_info\{version="1\.0\.0",node_id="test-node"\} 1/);
     // Exposition format must end with a newline.
     expect(body.endsWith('\n')).toBe(true);
   });
@@ -64,9 +64,9 @@ describe('GET /metrics (Prometheus exposition)', () => {
     harness.store.hset('h1', [['f', 'v']]);
 
     const body = await (await fetch(`${harness.baseUrl}/metrics`)).text();
-    expect(body).toMatch(/backendcache_keys\{type="string"\} 2/);
-    expect(body).toMatch(/backendcache_keys\{type="hash"\} 1/);
-    expect(body).toMatch(/backendcache_keys\{type="sortedset"\} 0/);
+    expect(body).toMatch(/zatedb_keys\{type="string"\} 2/);
+    expect(body).toMatch(/zatedb_keys\{type="hash"\} 1/);
+    expect(body).toMatch(/zatedb_keys\{type="sortedset"\} 0/);
   });
 
   it('still 404s unknown paths', async () => {

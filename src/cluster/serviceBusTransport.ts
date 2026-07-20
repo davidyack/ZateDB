@@ -74,7 +74,7 @@ function isEntityGone(err: unknown): boolean {
 
 /**
  * Azure Service Bus topic/subscription fan-out: one topic shared by every
- * BackendCache node, one subscription per node (the standard Service Bus
+ * ZateDB node, one subscription per node (the standard Service Bus
  * pattern for "every subscriber sees every message", as opposed to a
  * queue's competing-consumers semantics). The subscription is created
  * on-demand at startup and named after this node's id, since Container

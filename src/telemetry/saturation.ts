@@ -3,7 +3,7 @@ import { metrics } from '@opentelemetry/api';
 import type { Store } from '../store/store.js';
 import type { RespServer } from '../server/respServer.js';
 
-const meter = metrics.getMeter('backendcache');
+const meter = metrics.getMeter('zatedb');
 
 /**
  * Registers the saturation gauges that predict the failure modes the resource
@@ -16,19 +16,19 @@ export function initSaturationMetrics(store: Store, respServer: RespServer): () 
   const loopDelay = monitorEventLoopDelay({ resolution: 20 });
   loopDelay.enable();
 
-  const rss = meter.createObservableGauge('backendcache.process.memory.rss_bytes', {
+  const rss = meter.createObservableGauge('zatedb.process.memory.rss_bytes', {
     description: 'Resident set size in bytes',
   });
-  const heapUsed = meter.createObservableGauge('backendcache.process.memory.heap_used_bytes', {
+  const heapUsed = meter.createObservableGauge('zatedb.process.memory.heap_used_bytes', {
     description: 'V8 heap used in bytes',
   });
-  const storeBytes = meter.createObservableGauge('backendcache.store.memory_estimate_bytes', {
+  const storeBytes = meter.createObservableGauge('zatedb.store.memory_estimate_bytes', {
     description: 'Estimated keyspace size in bytes',
   });
-  const connections = meter.createObservableGauge('backendcache.connections.count', {
+  const connections = meter.createObservableGauge('zatedb.connections.count', {
     description: 'Currently open RESP connections',
   });
-  const loopLagP99 = meter.createObservableGauge('backendcache.event_loop.lag_p99_ms', {
+  const loopLagP99 = meter.createObservableGauge('zatedb.event_loop.lag_p99_ms', {
     description: 'Event-loop delay p99 in ms over the last scrape window',
   });
 

@@ -61,6 +61,6 @@
   a single key's full value (`GET /admin/keys/:key`) is an explicit,
   targeted, logged action.
 - **Every admin action is logged and emitted as a metric**
-  (`backendcache.admin.actions.total`), and `DELETE` in particular is
+  (`zatedb.admin.actions.total`), and `DELETE` in particular is
   treated as auditable — it mutates state a real client depends on, not a
   side-effect-free debug read.

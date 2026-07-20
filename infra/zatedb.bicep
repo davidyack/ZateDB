@@ -1,4 +1,4 @@
-// Deployment sketch for BackendCache as a multi-node (HA) Azure Container
+// Deployment sketch for ZateDB as a multi-node (HA) Azure Container
 // App, internal-only ingress, inside a Container Apps Environment the
 // consuming app's infrastructure already provisions. Not a complete,
 // standalone template — it assumes `containerEnv`, `acr`, `appIdentity`,
@@ -16,7 +16,7 @@ param location string = resourceGroup().location
 @description('Resource ID of the existing Container Apps Environment')
 param managedEnvironmentId string
 
-@description('Container image, e.g. <registry>.azurecr.io/backendcache:<tag>')
+@description('Container image, e.g. <registry>.azurecr.io/zatedb:<tag>')
 param containerImage string
 
 @description('User-assigned managed identity resource ID used to pull secrets from Key Vault and authenticate to Service Bus / Cosmos DB')
@@ -38,7 +38,7 @@ param serviceBusFullyQualifiedNamespace string
 param cosmosEndpoint string
 
 @description('Cosmos DB database name — must already exist')
-param cosmosDatabaseName string = 'backendcache'
+param cosmosDatabaseName string = 'zatedb'
 
 @description('Cosmos DB container for key state, partitioned on /key — must already exist. Enable DefaultTimeToLive on it (e.g. -1) so Cosmos evicts expired keys via each document\'s ttl. Also set a custom indexing policy that indexes only /key, /updatedAtMs, /entry/expiresAtMs and excludes /* — the default indexes every hash field and zset member, multiplying write RU several-fold. See docs/deployment.md (Cosmos DB cost & sizing).')
 param cosmosKeysContainerName string = 'keys'
@@ -47,7 +47,7 @@ param cosmosKeysContainerName string = 'keys'
 param cosmosNodesContainerName string = 'nodes'
 
 @description('Service Bus topic name every node publishes/subscribes to for replication — created on demand if missing')
-param serviceBusTopicName string = 'backendcache-replication'
+param serviceBusTopicName string = 'zatedb-replication'
 
 @description('Application Insights connection string')
 param appInsightsConnectionString string
@@ -62,8 +62,8 @@ param maxReplicas int = 5
 @description('Skip the Cosmos write for keys whose remaining TTL is under this (ms); peers still converge over Service Bus. 60s removes the dominant rate-limit/sliding-window RU. 0 persists everything. See docs/high-availability.md#cost.')
 param durabilityMinTtlMs int = 60000
 
-resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: '${namePrefix}-backendcache'
+resource zateDbApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: '${namePrefix}-zatedb'
   location: location
   identity: {
     type: 'UserAssigned'
@@ -91,7 +91,7 @@ resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
     template: {
       containers: [
         {
-          name: 'backendcache'
+          name: 'zatedb'
           image: containerImage
           resources: {
             cpu: json('0.25')
@@ -179,4 +179,4 @@ resource backendCacheApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
-output backendCacheFqdn string = backendCacheApp.properties.configuration.ingress.fqdn
+output zateDbFqdn string = zateDbApp.properties.configuration.ingress.fqdn

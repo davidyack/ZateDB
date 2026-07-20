@@ -16,12 +16,12 @@ import type { TestServer } from '../helpers/startServer.js';
  * does this by opening a dedicated PUBLISH client and a dedicated
  * SUBSCRIBE-only client per Socket.IO server instance. This test runs two
  * independent Socket.IO HTTP servers, each with its own adapter pair, both
- * pointed at the same BackendCache instance, and confirms a broadcast from
+ * pointed at the same ZateDB instance, and confirms a broadcast from
  * one is received by a client connected only to the other — the actual
  * production topology this exists to support.
  */
-describe('@socket.io/redis-adapter cross-replica fan-out against BackendCache', () => {
-  let backendCache: TestServer;
+describe('@socket.io/redis-adapter cross-replica fan-out against ZateDB', () => {
+  let zateDb: TestServer;
   let httpServerA: HttpServer;
   let httpServerB: HttpServer;
   let ioA: SocketIOServer;
@@ -31,7 +31,7 @@ describe('@socket.io/redis-adapter cross-replica fan-out against BackendCache', 
   const redisClients: Array<ReturnType<typeof createClient>> = [];
 
   async function makeAdapterPair() {
-    const pub = createClient({ url: backendCache.url });
+    const pub = createClient({ url: zateDb.url });
     const sub = pub.duplicate();
     pub.on('error', (e) => console.error('pub client error', e));
     sub.on('error', (e) => console.error('sub client error', e));
@@ -47,7 +47,7 @@ describe('@socket.io/redis-adapter cross-replica fan-out against BackendCache', 
   }
 
   beforeAll(async () => {
-    backendCache = await startTestServer();
+    zateDb = await startTestServer();
 
     httpServerA = createServer();
     httpServerB = createServer();
@@ -77,7 +77,7 @@ describe('@socket.io/redis-adapter cross-replica fan-out against BackendCache', 
     ioA.close();
     ioB.close();
     await Promise.all(redisClients.map((c) => c.quit()));
-    await backendCache.stop();
+    await zateDb.stop();
   });
 
   it('a broadcast emitted on replica A reaches a client connected only to replica B', async () => {
@@ -89,7 +89,7 @@ describe('@socket.io/redis-adapter cross-replica fan-out against BackendCache', 
       });
     });
 
-    // ioA has no direct connection to clientB; only the shared BackendCache
+    // ioA has no direct connection to clientB; only the shared ZateDB
     // pub/sub channel can carry this broadcast to replica B's socket.
     ioA.emit('cross-replica-event', 'hello-from-a', 42);
 

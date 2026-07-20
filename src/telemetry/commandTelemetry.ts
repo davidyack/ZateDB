@@ -13,25 +13,25 @@ export function bindSlowCommandThreshold(ms: number): void {
   slowCommandThresholdMs = ms > 0 ? ms : 0;
 }
 
-const tracer = trace.getTracer('backendcache');
-const meter = metrics.getMeter('backendcache');
+const tracer = trace.getTracer('zatedb');
+const meter = metrics.getMeter('zatedb');
 
-const commandsTotal = meter.createCounter('backendcache.commands.total', {
+const commandsTotal = meter.createCounter('zatedb.commands.total', {
   description: 'Total commands processed, by command and result',
 });
-const commandsDurationMs = meter.createHistogram('backendcache.commands.duration_ms', {
+const commandsDurationMs = meter.createHistogram('zatedb.commands.duration_ms', {
   description: 'Command execution latency in milliseconds',
 });
-const connectionsActive = meter.createUpDownCounter('backendcache.connections.active', {
+const connectionsActive = meter.createUpDownCounter('zatedb.connections.active', {
   description: 'Currently open RESP connections',
 });
-const pubsubSubscriptionsActive = meter.createUpDownCounter('backendcache.pubsub.subscriptions.active', {
+const pubsubSubscriptionsActive = meter.createUpDownCounter('zatedb.pubsub.subscriptions.active', {
   description: 'Currently active pub/sub subscriptions',
 });
-const adminActionsTotal = meter.createCounter('backendcache.admin.actions.total', {
+const adminActionsTotal = meter.createCounter('zatedb.admin.actions.total', {
   description: 'Admin API actions, by action and result',
 });
-const keysGauge = meter.createObservableGauge('backendcache.keys.count', {
+const keysGauge = meter.createObservableGauge('zatedb.keys.count', {
   description: 'Live keys held in this node\'s in-memory store, by type',
 });
 
@@ -95,7 +95,7 @@ export function getActiveConnectionCount(): number {
  * most importantly AUTH, whose first argument is the password: it must never
  * reach a span attribute, not even the 8-char-prefix form redactKey produces.
  * Channels/patterns (PUBLISH/SUBSCRIBE/...) aren't keyspace keys either, so
- * they're left untagged rather than misfiled under backendcache.key.
+ * they're left untagged rather than misfiled under zatedb.key.
  */
 const KEYSPACE_COMMANDS: ReadonlySet<string> = new Set([
   'GET',
@@ -125,11 +125,11 @@ export function traceCommand<T extends DispatchOutcome>(
   fn: () => T,
 ): T {
   const start = performance.now();
-  return tracer.startActiveSpan(`backendcache.command.${command || 'UNKNOWN'}`, (span) => {
-    span.setAttribute('db.system', 'backendcache');
+  return tracer.startActiveSpan(`zatedb.command.${command || 'UNKNOWN'}`, (span) => {
+    span.setAttribute('db.system', 'zatedb');
     span.setAttribute('db.operation', command);
-    span.setAttribute('backendcache.connection_id', connectionId);
-    if (keyArg !== undefined) span.setAttribute('backendcache.key', redactKey(keyArg));
+    span.setAttribute('zatedb.connection_id', connectionId);
+    if (keyArg !== undefined) span.setAttribute('zatedb.key', redactKey(keyArg));
 
     let outcome: T;
     let resultLabel: 'success' | 'error' = 'error';
@@ -137,12 +137,12 @@ export function traceCommand<T extends DispatchOutcome>(
       totalCommandsProcessed++;
       outcome = fn();
       resultLabel = outcome.isError ? 'error' : 'success';
-      span.setAttribute('backendcache.result', resultLabel);
+      span.setAttribute('zatedb.result', resultLabel);
       if (outcome.isError) span.setStatus({ code: SpanStatusCode.ERROR });
       commandsTotal.add(1, { command, result: resultLabel });
       return outcome;
     } catch (err) {
-      span.setAttribute('backendcache.result', 'error');
+      span.setAttribute('zatedb.result', 'error');
       span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
       commandsTotal.add(1, { command, result: 'error' });
       throw err;
@@ -193,7 +193,7 @@ export function recordAdminAction(action: string, resultLabel: 'success' | 'erro
  * with no natural parent span to attach to.
  */
 export function recordConnectionLifecycleEvent(name: string, attributes: Attributes): void {
-  const span = tracer.startSpan(`backendcache.${name}`);
+  const span = tracer.startSpan(`zatedb.${name}`);
   span.addEvent(name, attributes);
   span.end();
 }

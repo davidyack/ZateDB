@@ -1,4 +1,4 @@
-# BackendCache
+# ZateDB
 
 A small, self-hosted, RESP-protocol-compatible cache and pub/sub service. It
 implements only the Redis command surface a consuming application actually
@@ -7,7 +7,7 @@ the Socket.IO Redis adapter can connect to it as a drop-in replacement for
 Redis — no new SDK, no consuming-code changes beyond
 [one deliberate exception](./docs/rate-limit-store.md).
 
-BackendCache is intentionally narrow in scope: it is not a general-purpose
+ZateDB is intentionally narrow in scope: it is not a general-purpose
 Redis-compatible engine. It supports strings, hashes, sorted sets, key
 expiry, and pub/sub — nothing else — and adds commands only when a real
 caller needs them. See the full [command reference](./docs/command-reference.md)
@@ -18,10 +18,10 @@ for what's supported and why everything else is a deliberate non-goal.
 Some consuming applications have a cross-replica dependency on Redis
 (shared rate-limit counters, presence mirroring, Socket.IO fan-out,
 sliding-window abuse guards) that only matters once you run more than one
-API replica. BackendCache lets you satisfy that dependency with a small,
+API replica. ZateDB lets you satisfy that dependency with a small,
 purpose-built service you deploy alongside your app — no external managed
 Redis service required — while keeping the exact same client library and
-connection code your app already has. BackendCache itself runs as
+connection code your app already has. ZateDB itself runs as
 multiple nodes for high availability: each holds an in-memory hot copy for
 fast reads, stays in sync with the others over Azure Service Bus, and
 persists to Cosmos DB as the durable backing store, so a node restarting
@@ -44,7 +44,7 @@ npm run test:integration
 ```
 
 Correctness is defined by "does the real client library work" — the
-integration suite exercises a real BackendCache instance with `redis`
+integration suite exercises a real ZateDB instance with `redis`
 (node-redis v5), a real `express-rate-limit` middleware, and
 `@socket.io/redis-adapter`. See [Testing](./docs/testing.md) for details,
 including the CI-time [command coverage audit](./docs/testing.md#command-coverage-audit)
@@ -53,11 +53,11 @@ script.
 ## Deployment
 
 ```bash
-docker build -t backendcache:latest .
-docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 backendcache:latest
+docker build -t zatedb:latest .
+docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 zatedb:latest
 ```
 
-`infra/backendcache.bicep` is a sketch for a multi-node Azure Container
+`infra/zatedb.bicep` is a sketch for a multi-node Azure Container
 App (2+ replicas) with internal-only ingress, wired to Service Bus and
 Cosmos DB for cross-node sync. See [Deployment](./docs/deployment.md) for
 configuration options and the full picture.

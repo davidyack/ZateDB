@@ -1,17 +1,17 @@
 #!/usr/bin/env tsx
 /**
- * Repo-native performance harness for BackendCache.
+ * Repo-native performance harness for ZateDB.
  *
  * Standard Redis benchmark tools (redis-benchmark, memtier_benchmark) work
- * against BackendCache because it is RESP2 wire-compatible, but they default
- * to commands BackendCache deliberately does not implement (LPUSH, SPOP, …),
+ * against ZateDB because it is RESP2 wire-compatible, but they default
+ * to commands ZateDB deliberately does not implement (LPUSH, SPOP, …),
  * so every run needs hand-tuned flags to stay inside the supported command
  * surface (see docs/command-reference.md). This script does the same job
  * using the same `redis` (node-redis v5) client the consuming app uses, and
- * only ever issues commands BackendCache actually supports — so `npm run
+ * only ever issues commands ZateDB actually supports — so `npm run
  * bench` is meaningful out of the box with nothing else installed.
  *
- * By default it boots an in-process BackendCache server on an ephemeral
+ * By default it boots an in-process ZateDB server on an ephemeral
  * loopback port (the same way the integration tests do), benchmarks against
  * it, and shuts it down. Point it at an already-running instance with
  * --url / REDIS_URL to measure the real network path instead.
@@ -26,7 +26,7 @@
  * This is a client-side throughput/latency probe, not a formal benchmark:
  * numbers depend on the machine, Node version, and (for --url) the network
  * hop. Use it to catch regressions and compare configurations, not as an
- * absolute figure. It measures a single BackendCache node driven directly
+ * absolute figure. It measures a single ZateDB node driven directly
  * by one client connection pool; it deliberately does not exercise
  * cross-node HA replication (see docs/architecture.md).
  */
@@ -192,7 +192,7 @@ async function runBenchmark(client: RedisClientType, bench: Benchmark, ops: numb
 }
 
 /**
- * Boots an in-process BackendCache server on an ephemeral loopback port. The
+ * Boots an in-process ZateDB server on an ephemeral loopback port. The
  * cluster coordinator comes from the same factory index.ts uses; with no
  * Cosmos DB / Service Bus configured it resolves to a standalone (single-node,
  * HA-disabled) coordinator, so this benchmarks one node in isolation.
@@ -252,7 +252,7 @@ async function main(): Promise<void> {
     const server = await startInProcessServer();
     url = server.url;
     stopServer = server.stop;
-    console.log(`Started in-process BackendCache at ${url}`);
+    console.log(`Started in-process ZateDB at ${url}`);
   } else {
     console.log(`Benchmarking running instance at ${url}`);
   }

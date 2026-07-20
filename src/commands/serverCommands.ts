@@ -58,10 +58,10 @@ function buildSections(ctx: CommandContext): Section[] {
       name: 'Server',
       fields: [
         // redis_version is what clients feature-gate on; keep it in step with
-        // the version HELLO already advertises. backendcache_version is the
+        // the version HELLO already advertises. zatedb_version is the
         // same value under an unambiguous key.
         ['redis_version', SERVER_VERSION],
-        ['backendcache_version', SERVER_VERSION],
+        ['zatedb_version', SERVER_VERSION],
         ['server_name', SERVER_NAME],
         ['os', `${os.type()} ${os.release()} ${os.arch()}`],
         ['arch_bits', 64],

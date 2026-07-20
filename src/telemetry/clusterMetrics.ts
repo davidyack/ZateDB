@@ -1,6 +1,6 @@
 import { metrics } from '@opentelemetry/api';
 
-const meter = metrics.getMeter('backendcache');
+const meter = metrics.getMeter('zatedb');
 
 /**
  * Cost telemetry for the HA layer. Cosmos request units (RU) are the
@@ -10,10 +10,10 @@ const meter = metrics.getMeter('backendcache');
  * decisions (persistence exemption, write cadence) into arithmetic on real
  * data. See docs/high-availability.md#cost.
  */
-const cosmosRequestUnits = meter.createCounter('backendcache.cosmos.request_units', {
+const cosmosRequestUnits = meter.createCounter('zatedb.cosmos.request_units', {
   description: 'Cosmos DB request units consumed, dimensioned by operation (upsert/patch/query/delete)',
 });
-const serviceBusPublishes = meter.createCounter('backendcache.servicebus.publishes', {
+const serviceBusPublishes = meter.createCounter('zatedb.servicebus.publishes', {
   description: 'Replication events published to the Service Bus topic',
 });
 
@@ -42,7 +42,7 @@ let queueGaugeRegistered = false;
 export function registerReplicationQueueGauge(getDepth: () => number): void {
   if (queueGaugeRegistered) return;
   queueGaugeRegistered = true;
-  const gauge = meter.createObservableGauge('backendcache.replication.queue_depth', {
+  const gauge = meter.createObservableGauge('zatedb.replication.queue_depth', {
     description: 'Pending + in-flight replication tasks awaiting Cosmos/Service Bus',
   });
   gauge.addCallback((result) => result.observe(getDepth()));
@@ -61,7 +61,7 @@ let haGaugeRegistered = false;
 export function registerClusterHealthGauge(getHaEnabled: () => boolean): void {
   if (haGaugeRegistered) return;
   haGaugeRegistered = true;
-  const gauge = meter.createObservableGauge('backendcache.cluster.ha_enabled', {
+  const gauge = meter.createObservableGauge('zatedb.cluster.ha_enabled', {
     description: '1 when HA replication (Cosmos+Service Bus) is active, 0 when standalone/single-node',
   });
   gauge.addCallback((result) => result.observe(getHaEnabled() ? 1 : 0));
