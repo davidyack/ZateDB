@@ -50,6 +50,69 @@ it would at real Redis — e.g. `redis://:<password>@backendcache:6379` —
 with no other code changes beyond the
 [rate-limit store deviation](./rate-limit-store.md).
 
+## Cosmos DB cost & sizing
+
+Cosmos request units (RU) are the dominant marginal cost of the HA
+architecture (see [High availability → Cost](./high-availability.md#cost)).
+Three infra-level settings materially change the bill; none require code
+changes.
+
+### 1. Custom indexing policy on the `keys` container (biggest single lever)
+
+Cosmos's **default** indexing policy indexes *every path in every
+document* — every field of every presence hash, every member of every
+sliding-window zset, every counter origin. Write RU scales with the number
+of indexed paths, so the default makes each hash/zset patch and each upsert
+pay to index data no query ever reads. The only paths the service queries
+are `/key`, `/updatedAtMs`, and `/entry/expiresAtMs` (plus the
+server-managed `/_ts`, which is always indexed). Set this policy on the
+`keys` container — typically a **2–5× write-RU reduction** on
+container-typed entries:
+
+```json
+{
+  "indexingMode": "consistent",
+  "automatic": true,
+  "includedPaths": [
+    { "path": "/key/?" },
+    { "path": "/updatedAtMs/?" },
+    { "path": "/entry/expiresAtMs/?" }
+  ],
+  "excludedPaths": [{ "path": "/*" }]
+}
+```
+
+The container is provisioned outside this repo's Bicep sketch (it's assumed
+to already exist); apply the policy where that container is defined.
+
+### 2. Capacity mode: serverless vs. provisioned
+
+Pick from **measured** RU, not a guess (the `backendcache.cosmos.request_units`
+metric exists for exactly this — see [Observability](./observability.md)):
+
+- **Serverless** bills per request — wins at low or bursty sustained RU.
+- **Provisioned throughput (autoscale)** bills for the high-water decile —
+  wins once sustained average RU/s clears a few hundred.
+
+After a representative week, pick, record the reasoning here, and add an
+alert on RU-consumption slope so a keyspace or traffic regression shows up
+as a cost signal rather than a surprise bill.
+
+### 3. Persistence exemption for short-TTL keys
+
+Set `DURABILITY_MIN_TTL_MS` (e.g. `60000`) to stop persisting rate-limit /
+sliding-window churn that resets in seconds — see the env table above and
+[High availability → Cost](./high-availability.md#cost). This is usually the
+largest reduction in the *number* of durable writes.
+
+### Right-sizing
+
+Derive the threshold above, the capacity mode, replica count/size, and any
+future durable-write-cadence throttle from a representative Socket.IO +
+rate-limit load test with RU metering on. Publish the measured envelope
+(RU per command class, replication lag under burst, node headroom) here so
+the numbers are observed, not guessed.
+
 ## Running locally
 
 ```bash

@@ -367,6 +367,18 @@ rate × whether we persist the write* — which is where the levers are.
   to the latest before the round trip (see the Replication section), so a
   hot counter costs roughly one durable write per drain, not one per command.
 
+**A further lever, deferred until metered.** Decoupling the *Cosmos* write
+cadence from the *Service Bus* cadence — a per-key minimum interval between
+durable writes, so a steadily-written hot key persists at most once per
+interval while peers keep converging per broadcast — would trim RU beyond
+what coalescing already does. It is intentionally not implemented yet: its
+marginal benefit largely overlaps the coalescing above, a correct
+trailing-edge throttle needs per-key timers and a per-key timestamp map
+(an unbounded-memory hazard on a large keyspace that must be bounded
+carefully), and the right interval can only be chosen from the
+`backendcache.cosmos.request_units` meter under real load. Add it if the
+metered RU justifies the machinery.
+
 **Right-sizing.** The numeric threshold above, the Cosmos capacity mode
 (serverless vs. provisioned/autoscale), and replica count/size should be
 derived from a representative load test with RU metering on, not guessed —

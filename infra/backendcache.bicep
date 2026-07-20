@@ -40,7 +40,7 @@ param cosmosEndpoint string
 @description('Cosmos DB database name — must already exist')
 param cosmosDatabaseName string = 'backendcache'
 
-@description('Cosmos DB container for key state, partitioned on /key — must already exist. Enable DefaultTimeToLive on it (e.g. -1) so Cosmos evicts expired keys via each document\'s ttl property and the container doesn\'t grow unbounded — see docs/high-availability.md.')
+@description('Cosmos DB container for key state, partitioned on /key — must already exist. Enable DefaultTimeToLive on it (e.g. -1) so Cosmos evicts expired keys via each document\'s ttl. Also set a custom indexing policy that indexes only /key, /updatedAtMs, /entry/expiresAtMs and excludes /* — the default indexes every hash field and zset member, multiplying write RU several-fold. See docs/deployment.md (Cosmos DB cost & sizing).')
 param cosmosKeysContainerName string = 'keys'
 
 @description('Cosmos DB container for node heartbeat/topology snapshots, partitioned on /nodeId — must already exist. Enable DefaultTimeToLive on it (e.g. -1) so a crashed node\'s heartbeat doc self-expires via its per-document ttl (~2x NODE_STALE_MS) instead of lingering.')
