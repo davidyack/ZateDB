@@ -28,15 +28,15 @@
   "optionalDependencies": {
     "@azure/cosmos": "^4.9.3",
     "@azure/identity": "^4.5.0",
-    "@azure/monitor-opentelemetry-exporter": "^1.0.0-beta.27",
+    "@azure/monitor-opentelemetry-exporter": "^1.0.0-beta.43",
     "@azure/service-bus": "^7.9.5",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.55.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0",
-    "@opentelemetry/resources": "^1.28.0",
-    "@opentelemetry/sdk-metrics": "^1.28.0",
-    "@opentelemetry/sdk-node": "^0.55.0",
-    "@opentelemetry/sdk-trace-node": "^1.28.0",
-    "@opentelemetry/semantic-conventions": "^1.28.0"
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.220.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/resources": "^2.9.0",
+    "@opentelemetry/sdk-metrics": "^2.9.0",
+    "@opentelemetry/sdk-node": "^0.220.0",
+    "@opentelemetry/sdk-trace-node": "^2.9.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0"
   },
   "devDependencies": {
     "@socket.io/redis-adapter": "^8.3.0",
@@ -52,6 +52,6 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "uuid": "^11.0.4",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.10"
   }
 }
