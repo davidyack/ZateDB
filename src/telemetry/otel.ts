@@ -25,14 +25,14 @@ export async function initTelemetry(config: ServerConfig): Promise<TelemetryHand
   }
 
   try {
-    const [{ NodeSDK }, { Resource }, semconv] = await Promise.all([
+    const [{ NodeSDK }, { resourceFromAttributes }, semconv] = await Promise.all([
       import('@opentelemetry/sdk-node'),
       import('@opentelemetry/resources'),
       import('@opentelemetry/semantic-conventions'),
     ]);
 
-    const resource = new Resource({
-      [semconv.SemanticResourceAttributes.SERVICE_NAME]: config.otelServiceName,
+    const resource = resourceFromAttributes({
+      [semconv.ATTR_SERVICE_NAME]: config.otelServiceName,
     });
 
     const traceExporter = await buildTraceExporter(config);
