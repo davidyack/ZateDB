@@ -79,7 +79,6 @@ module zatedb 'modules/zatedb.bicep' = {
   params: {
     namePrefix: 'contoso'
     managedEnvironmentId: containerAppsEnvironment.id
-    containerImage: 'myregistry.azurecr.io/zatedb:abc123'
     serviceBusNamespaceName: serviceBus.name
     cosmosAccountName: cosmos.name
     authPassword: redisPassword
@@ -87,7 +86,10 @@ module zatedb 'modules/zatedb.bicep' = {
 }
 ```
 
-See [`infra/README.md`](./infra/README.md) for what it expects and the
+`containerImage` defaults to the published `ghcr.io/davidyack/zatedb` image,
+and the module itself is also published — see
+[`infra/README.md`](./infra/README.md) for referencing it directly instead
+of vendoring. See that same doc for the rest of what it expects and the
 already-have-Cosmos variants, and [Deployment](./docs/deployment.md) for
 configuration options and the full picture.
 

@@ -9,8 +9,6 @@
 //     -g rg-contoso \
 //     -f infra/examples/consumer-app.bicep \
 //     -p namePrefix=contoso \
-//        containerImage=myregistry.azurecr.io/zatedb:abc123 \
-//        containerRegistryName=myregistry \
 //        serviceBusNamespaceName=contoso-sb \
 //        cosmosAccountName=contoso-cosmos \
 //        apiImage=myregistry.azurecr.io/api:abc123
@@ -19,7 +17,9 @@ param namePrefix string
 param location string = resourceGroup().location
 
 param containerAppsEnvironmentName string
-param containerImage string
+
+@description('Defaults to the published ghcr.io/davidyack/zatedb image; override to pin a different tag/digest or pull from a private registry (with containerRegistryName).')
+param containerImage string = 'ghcr.io/davidyack/zatedb:0.1.0'
 param containerRegistryName string = ''
 param serviceBusNamespaceName string
 param cosmosAccountName string
