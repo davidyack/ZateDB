@@ -12,8 +12,6 @@ module zatedb 'modules/zatedb.bicep' = {
   params: {
     namePrefix: 'contoso'
     managedEnvironmentId: containerAppsEnvironment.id
-    containerImage: 'myregistry.azurecr.io/zatedb:abc123'
-    containerRegistryName: 'myregistry'
     serviceBusNamespaceName: serviceBus.name
     cosmosAccountName: cosmos.name
     authPassword: redisPassword
@@ -24,7 +22,44 @@ module zatedb 'modules/zatedb.bicep' = {
 { name: 'REDIS_URL', value: 'redis://:${redisPassword}@${zatedb.outputs.hostAndPort}' }
 ```
 
+`containerImage` defaults to the published public image
+(`ghcr.io/davidyack/zatedb:0.1.0`), so it's omitted above; pass it to pin a
+different tag/digest or to pull from a private registry instead (with
+`containerRegistryName` set, for AcrPull).
+
 `examples/consumer-app.bicep` is a complete worked version of the above.
+
+## Consuming the module without vendoring it
+
+Every tagged release also publishes the module itself as an OCI artifact, so
+you can reference it directly instead of copying the four files in
+`modules/`:
+
+```bicep
+module zatedb 'br:ghcr.io/davidyack/zatedb/main:0.1.0' = {
+  name: 'zatedb'
+  params: { /* same params as above */ }
+}
+```
+
+Publishing/restoring Bicep modules from a non-ACR OCI registry (GHCR here)
+is still a Bicep CLI experimental feature (`ociEnabled`), not GA — the
+`br:ghcr.io/...` reference above won't resolve until your own project also
+opts in, in a `bicepconfig.json` alongside (or above) the file that
+references it:
+
+```json
+{
+  "experimentalFeaturesEnabled": {
+    "ociEnabled": true
+  }
+}
+```
+
+If that's not acceptable for your build, vendor `modules/*.bicep` instead —
+the module has no other dependency on the flag.
+
+See [CHANGELOG.md](../CHANGELOG.md) for released versions.
 
 ## What you need first
 
@@ -33,10 +68,9 @@ module zatedb 'modules/zatedb.bicep' = {
 | Container Apps Environment | ZateDB runs in it, and **your app must run in the same one** — internal ingress is environment-scoped, so nothing outside it can reach ZateDB at all |
 | Service Bus namespace | Cross-node replication. The module adds its own topic |
 | Cosmos DB account (NoSQL API) | Durable store. The module adds its own database and containers |
-| A container image | Build and push `Dockerfile` first; Container Apps can't pull an image that doesn't exist yet |
 | A RESP password | You need the value anyway to build your app's `REDIS_URL`, so it's an input rather than something the module generates — Bicep outputs aren't secure and couldn't hand it back safely |
 
-Everything else has a default.
+Everything else has a default, including the container image.
 
 ## If you already have Cosmos
 

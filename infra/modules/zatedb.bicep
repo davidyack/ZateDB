@@ -8,15 +8,15 @@
 // database and containers, and every role assignment those need. Nothing has
 // to be created by hand first.
 //
-// Minimal call:
+// Minimal call — containerImage defaults to the published GHCR image, so it
+// can be omitted entirely unless you're pinning a different tag or pulling
+// from a private registry:
 //
 //   module zatedb 'modules/zatedb.bicep' = {
 //     name: 'zatedb'
 //     params: {
 //       namePrefix: 'contoso'
 //       managedEnvironmentId: env.id
-//       containerImage: 'myregistry.azurecr.io/zatedb:abc123'
-//       containerRegistryName: 'myregistry'
 //       serviceBusNamespaceName: sb.name
 //       cosmosAccountName: cosmos.name
 //       authPassword: redisPassword
@@ -39,8 +39,8 @@ param location string = resourceGroup().location
 @description('Resource ID of the existing Container Apps Environment. The consuming app must run in this same environment — internal ingress is environment-scoped, so nothing outside it can reach ZateDB at all.')
 param managedEnvironmentId string
 
-@description('Container image, e.g. <registry>.azurecr.io/zatedb:<tag>. Pin a digest or an immutable tag; Container Apps resolves a tag to a digest once, at revision-creation time, so a revision pointing at :latest keeps serving whatever it first pulled.')
-param containerImage string
+@description('Container image, e.g. <registry>.azurecr.io/zatedb:<tag>. Pin a digest or an immutable tag; Container Apps resolves a tag to a digest once, at revision-creation time, so a revision pointing at :latest keeps serving whatever it first pulled. Defaults to the published GHCR image at the version this module ships with; override to pin a different tag/digest or to use a private registry.')
+param containerImage string = 'ghcr.io/davidyack/zatedb:0.1.0'
 
 @description('Name of the container registry to pull from, when it is a private Azure Container Registry. Leave empty for a public image. When set, this module grants its identity AcrPull.')
 param containerRegistryName string = ''

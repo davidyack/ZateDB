@@ -1,0 +1,94 @@
+name: Publish
+
+# Publishes to GHCR, which is public for a public repo by default (no
+# secrets to configure) — this replaces the old ACR-based workflow, which
+# required every consumer to have credentials for a shared private registry.
+#
+# - Pushes to main publish `edge` and `sha-<short>` — moving dev tags, never
+#   used as the module's default.
+# - Semver tags (vX.Y.Z) publish the immutable image tag `X.Y.Z` plus
+#   `latest`, and the corresponding Bicep module version to the OCI registry
+#   (see the bicep-module job) — see infra/modules/zatedb.bicep's
+#   containerImage default and infra/README.md.
+#
+# One-time manual step after this workflow first runs: GHCR packages
+# created via GITHUB_TOKEN default to private even in a public repo. An
+# org owner must flip visibility to public once, at
+# https://github.com/users/davidyack/packages/container/zatedb/settings
+# (and .../zatedb%2Fmain/settings for the Bicep module) — GITHUB_TOKEN
+# cannot do this itself.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+env:
+  IMAGE: ghcr.io/davidyack/zatedb
+  MODULE: ghcr.io/davidyack/zatedb/main
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+            echo "tags=${IMAGE}:${version},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${IMAGE}:edge,${IMAGE}:sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # Persist the layer cache in the registry itself so `npm ci` (the
+          # slow step, run twice by the multi-stage build) is reused across
+          # runs instead of rebuilt from scratch on every merge.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+  bicep-module:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: anthony-c-martin/setup-bicep@v1
+
+      # zatedb.bicep's local module references (cosmos-resources.bicep,
+      # servicebus-resources.bicep, acr-pull.bicep) compile inline into the
+      # published artifact, so consumers only ever reference this one path —
+      # no vendoring the other three files.
+      - name: Publish Bicep module
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          bicep publish infra/modules/zatedb.bicep --target "br:${MODULE}:${version}" --force
+          bicep publish infra/modules/zatedb.bicep --target "br:${MODULE}:latest" --force
