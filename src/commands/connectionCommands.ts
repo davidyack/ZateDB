@@ -2,7 +2,7 @@ import { array, bulk, integer, OK, simple } from '../resp/types.js';
 import type { RespValue } from '../resp/types.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
-import { invalidPasswordError, wrongArgsError } from './errors.js';
+import { invalidPasswordError, noProtoError, wrongArgsError } from './errors.js';
 import { secureEqual } from '../util/secureCompare.js';
 import { SERVER_NAME, SERVER_VERSION } from '../version.js';
 
@@ -12,14 +12,24 @@ export function ping(ctx: CommandContext, args: string[]): CommandResult {
 }
 
 /**
- * Acknowledges HELLO without requiring RESP3 — the connection keeps
- * speaking RESP2 regardless of the requested protover. Real clients (e.g.
- * node-redis) use this to fetch server identity during the handshake.
+ * Negotiates the connection's RESP protocol version. Both RESP2 and RESP3
+ * are supported side by side, per-connection — a client that asks for
+ * RESP3 (e.g. node-redis v6+, which sends HELLO 3 by default) gets real
+ * RESP3 replies (maps, push frames, `_` nulls); a client that never sends
+ * HELLO, or explicitly asks for RESP2, keeps getting today's RESP2 wire
+ * format. Anything other than 2 or 3 is rejected with NOPROTO, matching
+ * real Redis.
  */
 export function hello(ctx: CommandContext, args: string[]): CommandResult {
   // args may include: [protover] [AUTH username password] [SETNAME clientname]
   let i = 0;
-  if (args.length > 0 && /^\d+$/.test(args[0])) i = 1;
+  let protover = ctx.conn.protover;
+  if (args.length > 0 && /^\d+$/.test(args[0])) {
+    const requested = Number(args[0]);
+    if (requested !== 2 && requested !== 3) return result(noProtoError());
+    protover = requested;
+    i = 1;
+  }
 
   for (; i < args.length; i++) {
     const sub = args[i].toUpperCase();
@@ -35,10 +45,12 @@ export function hello(ctx: CommandContext, args: string[]): CommandResult {
     }
   }
 
+  ctx.conn.protover = protover;
+
   const fields: Array<[string, RespValue]> = [
     ['server', bulk(SERVER_NAME)],
     ['version', bulk(SERVER_VERSION)],
-    ['proto', integer(2)],
+    ['proto', integer(protover)],
     ['id', integer(hashConnId(ctx.conn.id))],
     ['mode', bulk('standalone')],
     ['role', bulk('master')],

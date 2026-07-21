@@ -1,6 +1,6 @@
 import type { Store } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
-import type { RespValue } from '../resp/types.js';
+import type { Protover, RespValue } from '../resp/types.js';
 import type { ServerConfig } from '../config.js';
 import type { ClusterCoordinator } from '../cluster/clusterCoordinator.js';
 
@@ -15,6 +15,8 @@ export interface ConnectionContext {
   remoteAddress: string;
   /** Consecutive failed AUTH attempts on this connection; reset to 0 on success. Backs failed-auth throttling. */
   failedAuthCount: number;
+  /** RESP protocol version negotiated via HELLO. Defaults to 2 until a client asks for 3. */
+  protover: Protover;
 
   sendMessage(channel: string, message: string): void;
   sendPMessage(pattern: string, channel: string, message: string): void;

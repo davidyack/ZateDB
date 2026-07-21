@@ -110,6 +110,7 @@ export const COMMANDS: Record<string, CommandSpec> = {
   PSUBSCRIBE: spec(pubsubCommands.psubscribe, { allowedInSubscriberMode: true }),
   UNSUBSCRIBE: spec(pubsubCommands.unsubscribe, { allowedInSubscriberMode: true }),
   PUNSUBSCRIBE: spec(pubsubCommands.punsubscribe, { allowedInSubscriberMode: true }),
+  PUBSUB: spec(pubsubCommands.pubsub, { allowedInSubscriberMode: true }),
 };
 
 export interface DispatchOutcome extends CommandResult {
@@ -229,7 +230,13 @@ export function dispatch(ctx: CommandContext, rawArgs: string[]): DispatchOutcom
     return { command, frames: [notAuthenticatedError()], isError: true };
   }
 
-  if (ctx.conn.mode === 'subscriber' && !cmdSpec.allowedInSubscriberMode) {
+  // RESP3 delivers pub/sub as out-of-band push frames instead of taking
+  // over the reply stream, so a RESP3 subscriber is free to run normal
+  // commands — that's the whole point of push frames. The RESP2
+  // subscriber-only restriction (only (P)SUBSCRIBE/PING/QUIT allowed)
+  // still applies to RESP2 connections, since their pub/sub messages and
+  // command replies share one undifferentiated array stream.
+  if (ctx.conn.mode === 'subscriber' && ctx.conn.protover === 2 && !cmdSpec.allowedInSubscriberMode) {
     return { command, frames: [subscriberModeError(command)], isError: true };
   }
 

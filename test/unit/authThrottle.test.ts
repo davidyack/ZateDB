@@ -8,6 +8,7 @@ function ctxWith(env: Record<string, string>, conn: Partial<ConnectionContext> =
     id: 'c1',
     authenticated: false,
     failedAuthCount: 0,
+    protover: 2,
     mode: 'command',
     clientName: null,
     remoteAddress: '127.0.0.1:0',

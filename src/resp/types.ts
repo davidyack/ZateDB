@@ -1,10 +1,19 @@
+/** RESP protocol version negotiated per-connection via HELLO. Defaults to 2. */
+export type Protover = 2 | 3;
+
 export type RespValue =
   | { type: 'simple'; value: string }
   | { type: 'error'; value: string }
   | { type: 'integer'; value: number }
   | { type: 'bulk'; value: string | null }
   | { type: 'array'; value: RespValue[] | null }
-  | { type: 'map'; value: Array<[RespValue, RespValue]> };
+  | { type: 'map'; value: Array<[RespValue, RespValue]> }
+  /**
+   * Out-of-band frames (pub/sub messages and subscribe/unsubscribe
+   * confirmations). RESP3 has a dedicated `>` push type for these; RESP2
+   * has none, so it falls back to a plain array — see serializer.ts.
+   */
+  | { type: 'push'; value: RespValue[] };
 
 export const OK: RespValue = { type: 'simple', value: 'OK' };
 export const NIL: RespValue = { type: 'bulk', value: null };
@@ -32,6 +41,10 @@ export function array(value: RespValue[] | null): RespValue {
 
 export function bulkArray(values: string[]): RespValue {
   return { type: 'array', value: values.map((v) => bulk(v)) };
+}
+
+export function push(value: RespValue[]): RespValue {
+  return { type: 'push', value };
 }
 
 /** Errors thrown by the RESP frame reader for malformed input on the wire. */

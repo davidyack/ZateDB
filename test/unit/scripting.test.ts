@@ -15,6 +15,7 @@ function fakeConn(): ConnectionContext {
     id: 'test-conn',
     authenticated: true,
     failedAuthCount: 0,
+    protover: 2,
     mode: 'command',
     clientName: null,
     remoteAddress: '127.0.0.1:0',

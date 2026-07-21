@@ -133,4 +133,44 @@ describe('PubSubRegistry', () => {
     expect(topo.channels).toEqual([{ channel: 'room:1', subscriberCount: 2 }]);
     expect(topo.patterns).toEqual([{ pattern: 'room:*', subscriberCount: 1 }]);
   });
+
+  describe('PUBSUB introspection helpers', () => {
+    it('subscriberCountForChannel reports 0 for a channel with no subscribers', () => {
+      const registry = new PubSubRegistry();
+      expect(registry.subscriberCountForChannel('nobody')).toBe(0);
+    });
+
+    it('subscriberCountForChannel counts exact-match subscribers only, not pattern subscribers', () => {
+      const registry = new PubSubRegistry();
+      const a = fakeSubscriber('a');
+      const b = fakeSubscriber('b');
+      registry.subscribeChannel(a, 'room:1');
+      registry.subscribeChannel(b, 'room:1');
+      registry.subscribePattern(fakeSubscriber('c'), 'room:*');
+      expect(registry.subscriberCountForChannel('room:1')).toBe(2);
+    });
+
+    it('patternCount reports the number of distinct active patterns', () => {
+      const registry = new PubSubRegistry();
+      expect(registry.patternCount()).toBe(0);
+      registry.subscribePattern(fakeSubscriber('a'), 'room:*');
+      registry.subscribePattern(fakeSubscriber('b'), 'room:*'); // same pattern, still 1
+      registry.subscribePattern(fakeSubscriber('c'), 'lobby:*');
+      expect(registry.patternCount()).toBe(2);
+    });
+
+    it('activeChannels lists channels with at least one subscriber', () => {
+      const registry = new PubSubRegistry();
+      registry.subscribeChannel(fakeSubscriber('a'), 'room:1');
+      registry.subscribeChannel(fakeSubscriber('b'), 'room:2');
+      expect(new Set(registry.activeChannels())).toEqual(new Set(['room:1', 'room:2']));
+    });
+
+    it('activeChannels filters by glob pattern', () => {
+      const registry = new PubSubRegistry();
+      registry.subscribeChannel(fakeSubscriber('a'), 'room:1');
+      registry.subscribeChannel(fakeSubscriber('b'), 'lobby:1');
+      expect(registry.activeChannels('room:*')).toEqual(['room:1']);
+    });
+  });
 });

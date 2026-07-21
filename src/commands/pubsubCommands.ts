@@ -1,11 +1,12 @@
-import { array, bulk, integer } from '../resp/types.js';
+import { array, bulk, bulkArray, error, integer, push } from '../resp/types.js';
 import type { RespValue } from '../resp/types.js';
 import type { CommandContext, CommandResult } from './context.js';
+import { result } from './context.js';
 import { wrongArgsError } from './errors.js';
 import { recordSubscriptionChange, recordSubscriptionLifecycleEvent } from '../telemetry/commandTelemetry.js';
 
 function confirmation(kind: string, name: string | null, count: number): RespValue {
-  return array([bulk(kind), name === null ? bulk(null) : bulk(name), integer(count)]);
+  return push([bulk(kind), name === null ? bulk(null) : bulk(name), integer(count)]);
 }
 
 export function publish(ctx: CommandContext, args: string[]): CommandResult {
@@ -77,4 +78,34 @@ export function punsubscribe(ctx: CommandContext, args: string[]): CommandResult
   }
   if (ctx.conn.totalSubscriptions() === 0) ctx.conn.mode = 'command';
   return { frames };
+}
+
+/**
+ * PUBSUB introspection. Required by @socket.io/redis-adapter: serverCount()
+ * (used by io.fetchSockets()/io.sockets()/allRooms()/broadcastWithAck()/
+ * serverSideEmit-with-ack) calls PUBSUB NUMSUB under the hood — without
+ * this, every adapter call that needs an ack from other nodes fails.
+ */
+export function pubsub(ctx: CommandContext, args: string[]): CommandResult {
+  const sub = (args[0] ?? '').toUpperCase();
+  if (sub === 'NUMSUB') {
+    const flat: RespValue[] = [];
+    for (const channel of args.slice(1)) {
+      flat.push(bulk(channel), integer(ctx.pubsub.subscriberCountForChannel(channel)));
+    }
+    return result(array(flat));
+  }
+  if (sub === 'NUMPAT') {
+    if (args.length !== 1) return result(wrongArgsError('pubsub|numpat'));
+    return result(integer(ctx.pubsub.patternCount()));
+  }
+  if (sub === 'CHANNELS') {
+    if (args.length > 2) return result(wrongArgsError('pubsub|channels'));
+    return result(bulkArray(ctx.pubsub.activeChannels(args[1])));
+  }
+  return result(unknownPubsubSubcommandError(args[0] ?? ''));
+}
+
+function unknownPubsubSubcommandError(sub: string): RespValue {
+  return error(`ERR Unknown PUBSUB subcommand or wrong number of arguments for '${sub}'`);
 }

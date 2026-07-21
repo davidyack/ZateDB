@@ -202,6 +202,21 @@ function pushResp(L: any, v: RespValue): void {
       });
       return;
     }
+    case 'push': {
+      // Out-of-band pub/sub frames never reach here in practice (SUBSCRIBE
+      // et al. are in NOT_ALLOWED_IN_SCRIPT), but redis.call still needs a
+      // defined conversion for exhaustiveness — treat it like an array.
+      lua.lua_createtable(L, v.value.length, 0);
+      v.value.forEach((el, i) => {
+        pushResp(L, el);
+        lua.lua_rawseti(L, -2, i + 1);
+      });
+      return;
+    }
+    default: {
+      const _exhaustive: never = v;
+      throw new Error(`unreachable: ${JSON.stringify(_exhaustive)}`);
+    }
   }
 }
 

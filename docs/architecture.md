@@ -27,12 +27,17 @@ the consistency model that implies), see
 
 ## Transport
 
-Raw TCP (`net.createServer`), RESP2 framing — see
+Raw TCP (`net.createServer`), RESP framing — see
 [`src/resp/parser.ts`](../src/resp/parser.ts) and
-[`src/resp/serializer.ts`](../src/resp/serializer.ts). Bulk strings are
-treated as binary-safe: parsing and serialization use `latin1` byte-for-byte
-encoding rather than assuming UTF-8. This matters in practice — the
-Socket.IO Redis adapter publishes msgpack-encoded binary payloads over
+[`src/resp/serializer.ts`](../src/resp/serializer.ts). Requests are always
+parsed the same way regardless of protocol version (clients send commands as
+plain arrays of bulk strings under both RESP2 and RESP3); replies are
+serialized per-connection as RESP2 or RESP3 depending on what that
+connection negotiated via `HELLO` — see
+[RESP2/RESP3 support](./command-reference.md#resp2resp3-support). Bulk
+strings are treated as binary-safe: parsing and serialization use `latin1`
+byte-for-byte encoding rather than assuming UTF-8. This matters in practice —
+the Socket.IO Redis adapter publishes msgpack-encoded binary payloads over
 `PUBLISH`, and a UTF-8 round-trip would silently corrupt them. This gap was
 only caught by testing against the real `@socket.io/redis-adapter` package
 (see [Testing](./testing.md)), not by hand-written protocol tests.
