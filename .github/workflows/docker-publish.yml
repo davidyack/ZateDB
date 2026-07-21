@@ -5,27 +5,27 @@ on:
     branches: [main]
 
 env:
-  REGISTRY: dydemoacr.azurecr.io
-  IMAGE: zatedb
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/zatedb
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # GITHUB_TOKEN needs package write scope to push to GHCR; no long-lived
+      # registry credential to store or rotate.
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
-      # Registry-wide admin credential. It is shared and unscoped, so any push
-      # it makes is attributable only to "the registry admin" — rotate it with
-      # `az acr credential renew -n dydemoacr --password-name password` if it
-      # ever leaks, and prefer a repo-scoped OIDC identity if this graduates
-      # past demo use.
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
         with:

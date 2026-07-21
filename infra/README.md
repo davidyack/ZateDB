@@ -12,8 +12,7 @@ module zatedb 'modules/zatedb.bicep' = {
   params: {
     namePrefix: 'contoso'
     managedEnvironmentId: containerAppsEnvironment.id
-    containerImage: 'myregistry.azurecr.io/zatedb:abc123'
-    containerRegistryName: 'myregistry'
+    containerImage: 'ghcr.io/davidyack/zatedb:abc123'
     serviceBusNamespaceName: serviceBus.name
     cosmosAccountName: cosmos.name
     authPassword: redisPassword
@@ -33,7 +32,7 @@ module zatedb 'modules/zatedb.bicep' = {
 | Container Apps Environment | ZateDB runs in it, and **your app must run in the same one** — internal ingress is environment-scoped, so nothing outside it can reach ZateDB at all |
 | Service Bus namespace | Cross-node replication. The module adds its own topic |
 | Cosmos DB account (NoSQL API) | Durable store. The module adds its own database and containers |
-| A container image | Build and push `Dockerfile` first; Container Apps can't pull an image that doesn't exist yet |
+| A container image | `ghcr.io/davidyack/zatedb` is published publicly on every merge to `main`, so no registry credential is needed. To pull from a private Azure Container Registry instead, build and push `Dockerfile` yourself and also pass `containerRegistryName` — the module then grants its identity `AcrPull` |
 | A RESP password | You need the value anyway to build your app's `REDIS_URL`, so it's an input rather than something the module generates — Bicep outputs aren't secure and couldn't hand it back safely |
 
 Everything else has a default.

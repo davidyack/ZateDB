@@ -9,8 +9,7 @@
 //     -g rg-contoso \
 //     -f infra/examples/consumer-app.bicep \
 //     -p namePrefix=contoso \
-//        containerImage=myregistry.azurecr.io/zatedb:abc123 \
-//        containerRegistryName=myregistry \
+//        containerImage=ghcr.io/davidyack/zatedb:abc123 \
 //        serviceBusNamespaceName=contoso-sb \
 //        cosmosAccountName=contoso-cosmos \
 //        apiImage=myregistry.azurecr.io/api:abc123
@@ -20,6 +19,8 @@ param location string = resourceGroup().location
 
 param containerAppsEnvironmentName string
 param containerImage string
+
+@description('Only when containerImage is a private Azure Container Registry; the public ghcr.io image needs no credential.')
 param containerRegistryName string = ''
 param serviceBusNamespaceName string
 param cosmosAccountName string

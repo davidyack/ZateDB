@@ -154,8 +154,7 @@ module zatedb 'modules/zatedb.bicep' = {
   params: {
     namePrefix: 'contoso'
     managedEnvironmentId: containerAppsEnvironment.id
-    containerImage: 'myregistry.azurecr.io/zatedb:abc123'
-    containerRegistryName: 'myregistry'
+    containerImage: 'ghcr.io/davidyack/zatedb:abc123'
     serviceBusNamespaceName: serviceBus.name
     cosmosAccountName: cosmos.name
     authPassword: redisPassword
@@ -167,8 +166,11 @@ module zatedb 'modules/zatedb.bicep' = {
 ```
 
 The prerequisites are a Container Apps Environment, a Service Bus namespace,
-a Cosmos DB account, a pushed image, and a password. Everything else has a
-default. See [`infra/README.md`](../infra/README.md) for the resource-group
+a Cosmos DB account, an image, and a password. Everything else has a
+default. `ghcr.io/davidyack/zatedb` is public, so no registry credential is
+needed; pulling from a private Azure Container Registry instead means also
+passing `containerRegistryName`, which makes the module grant its identity
+`AcrPull`. See [`infra/README.md`](../infra/README.md) for the resource-group
 and subscription overrides when those live elsewhere, the four "I already
 have Cosmos" variants, and the permissions the deploying principal needs.
 [`infra/examples/consumer-app.bicep`](../infra/examples/consumer-app.bicep)

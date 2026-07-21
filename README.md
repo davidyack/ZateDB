@@ -63,6 +63,13 @@ script.
 ## Deployment
 
 ```bash
+docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 ghcr.io/davidyack/zatedb:latest
+```
+
+Every merge to `main` publishes that image, tagged with both the commit SHA
+and `latest`. To build it yourself instead:
+
+```bash
 docker build -t zatedb:latest .
 docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 zatedb:latest
 ```
@@ -79,7 +86,7 @@ module zatedb 'modules/zatedb.bicep' = {
   params: {
     namePrefix: 'contoso'
     managedEnvironmentId: containerAppsEnvironment.id
-    containerImage: 'myregistry.azurecr.io/zatedb:abc123'
+    containerImage: 'ghcr.io/davidyack/zatedb:abc123'
     serviceBusNamespaceName: serviceBus.name
     cosmosAccountName: cosmos.name
     authPassword: redisPassword
