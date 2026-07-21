@@ -60,6 +60,16 @@ libraries a consuming app uses:
   [Architecture](./architecture.md#transport)): the adapter publishes
   msgpack-encoded payloads, and a UTF-8-based RESP implementation silently
   corrupted them.
+- **`redis-v6` (node-redis v6, aliased in `devDependencies` so it can't
+  collide with the pinned v5 client)** —
+  [`test/integration/resp3.test.ts`](../test/integration/resp3.test.ts) and
+  [`test/integration/socketioAdapterResp3.test.ts`](../test/integration/socketioAdapterResp3.test.ts).
+  node-redis v6 defaults to RESP3 (it sends `HELLO 3` on every connect, with
+  no RESP2 fallback), which the pinned v5 client never exercises on its own
+  — that gap is exactly what let a RESP3-acknowledged-but-RESP2-encoded
+  connection ship undetected. Both tests assert **zero client-side error
+  events**, not just delivery: a client that logs a protocol error per frame
+  and keeps limping must fail the suite.
 - **The sorted-set sliding-window pattern** used by cooldown/rate-cap-style
   guards — `ZADD` / `ZREMRANGEBYSCORE` / `ZCOUNT` with the exact
   range-argument syntax (`` `(${now - windowMs}`, '+inf' ``) such a caller

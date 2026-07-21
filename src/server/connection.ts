@@ -2,7 +2,8 @@ import type { Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { RespRequestParser } from '../resp/parser.js';
 import { serialize } from '../resp/serializer.js';
-import { array, bulk } from '../resp/types.js';
+import { bulk, push } from '../resp/types.js';
+import type { Protover } from '../resp/types.js';
 import { RespProtocolError } from '../resp/types.js';
 import { error as respError } from '../resp/types.js';
 import type { Store } from '../store/store.js';
@@ -40,6 +41,8 @@ export class Connection implements ConnectionContext {
   mode: ConnectionMode = 'handshake';
   clientName: string | null = null;
   failedAuthCount = 0;
+  /** RESP protocol version negotiated via HELLO; RESP2 until a client asks for RESP3. */
+  protover: Protover = 2;
   readonly remoteAddress: string;
 
   private parser: RespRequestParser;
@@ -134,7 +137,7 @@ export class Connection implements ConnectionContext {
 
   private write(frame: Parameters<typeof serialize>[0]): void {
     if (!this.socket.writable) return;
-    this.socket.write(serialize(frame));
+    this.socket.write(serialize(frame, this.protover));
     // Slow-consumer guard: a stalled subscriber makes PUBLISH fan-out pile up
     // in Node's outbound buffer unboundedly (Redis calls this
     // client-output-buffer-limit). Drop the connection once its backlog crosses
@@ -184,11 +187,11 @@ export class Connection implements ConnectionContext {
   // ---- ConnectionContext / pubsub.Subscriber -----------------------------
 
   sendMessage(channel: string, message: string): void {
-    this.write(array([bulk('message'), bulk(channel), bulk(message)]));
+    this.write(push([bulk('message'), bulk(channel), bulk(message)]));
   }
 
   sendPMessage(pattern: string, channel: string, message: string): void {
-    this.write(array([bulk('pmessage'), bulk(pattern), bulk(channel), bulk(message)]));
+    this.write(push([bulk('pmessage'), bulk(pattern), bulk(channel), bulk(message)]));
   }
 
   totalSubscriptions(): number {

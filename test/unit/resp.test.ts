@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { RespRequestParser } from '../../src/resp/parser.js';
 import { serialize } from '../../src/resp/serializer.js';
-import { array, bulk, bulkArray, error, integer, NIL, OK, simple } from '../../src/resp/types.js';
+import { array, bulk, bulkArray, error, integer, NIL, OK, push, simple } from '../../src/resp/types.js';
 
 describe('RespRequestParser', () => {
   it('parses a single multibulk command', () => {
@@ -105,6 +105,44 @@ describe('serialize', () => {
   it('serializes maps as flat arrays (RESP2 has no map type)', () => {
     const frame = serialize({ type: 'map', value: [[bulk('field'), bulk('value')]] });
     expect(frame.toString()).toBe('*2\r\n$5\r\nfield\r\n$5\r\nvalue\r\n');
+  });
+
+  it('serializes push frames as plain arrays under RESP2', () => {
+    const frame = serialize(push([bulk('message'), bulk('chan'), bulk('hi')]));
+    expect(frame.toString()).toBe('*3\r\n$7\r\nmessage\r\n$4\r\nchan\r\n$2\r\nhi\r\n');
+  });
+});
+
+describe('serialize (RESP3, protover 3)', () => {
+  it('serializes nil bulk as the unified null type', () => {
+    expect(serialize(NIL, 3).toString()).toBe('_\r\n');
+  });
+
+  it('serializes nil array as the unified null type', () => {
+    expect(serialize(array(null), 3).toString()).toBe('_\r\n');
+  });
+
+  it('leaves non-null bulk/array/simple/error/integer frames unchanged from RESP2', () => {
+    expect(serialize(bulk('hello'), 3).toString()).toBe('$5\r\nhello\r\n');
+    expect(serialize(bulkArray(['a', 'b']), 3).toString()).toBe('*2\r\n$1\r\na\r\n$1\r\nb\r\n');
+    expect(serialize(simple('PONG'), 3).toString()).toBe('+PONG\r\n');
+    expect(serialize(error('ERR boom'), 3).toString()).toBe('-ERR boom\r\n');
+    expect(serialize(integer(42), 3).toString()).toBe(':42\r\n');
+  });
+
+  it('serializes maps as a real RESP3 map, not a flattened array', () => {
+    const frame = serialize({ type: 'map', value: [[bulk('field'), bulk('value')]] }, 3);
+    expect(frame.toString()).toBe('%1\r\n$5\r\nfield\r\n$5\r\nvalue\r\n');
+  });
+
+  it('serializes push frames with the > marker', () => {
+    const frame = serialize(push([bulk('message'), bulk('chan'), bulk('hi')]), 3);
+    expect(frame.toString()).toBe('>3\r\n$7\r\nmessage\r\n$4\r\nchan\r\n$2\r\nhi\r\n');
+  });
+
+  it('propagates protover into nested values', () => {
+    const frame = serialize(push([bulk('pmessage'), NIL, array(null)]), 3);
+    expect(frame.toString()).toBe('>3\r\n$8\r\npmessage\r\n_\r\n_\r\n');
   });
 });
 

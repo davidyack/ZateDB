@@ -29,12 +29,18 @@ describe('@socket.io/redis-adapter cross-replica fan-out against ZateDB', () => 
   let clientA: ClientSocket;
   let clientB: ClientSocket;
   const redisClients: Array<ReturnType<typeof createClient>> = [];
+  // Any 'error' event on an adapter's pub/sub client means the client and
+  // server disagreed about the wire protocol (see test/integration/resp3.test.ts)
+  // — a client that logs an error per frame and keeps limping must fail
+  // this suite, not just have delivery checked. Collected across every
+  // pub/sub client pair created for this describe block.
+  const clientErrors: unknown[] = [];
 
   async function makeAdapterPair() {
     const pub = createClient({ url: zateDb.url });
     const sub = pub.duplicate();
-    pub.on('error', (e) => console.error('pub client error', e));
-    sub.on('error', (e) => console.error('sub client error', e));
+    pub.on('error', (e) => clientErrors.push(e));
+    sub.on('error', (e) => clientErrors.push(e));
     await Promise.all([pub.connect(), sub.connect()]);
     redisClients.push(pub, sub);
     // @socket.io/redis-adapter bundles its own nested `redis`/`@redis/client`
@@ -123,5 +129,9 @@ describe('@socket.io/redis-adapter cross-replica fan-out against ZateDB', () => 
     ioB.to('room:cross').emit('room-event', 'hello-room');
 
     await expect(received).resolves.toBe('hello-room');
+  });
+
+  it('neither adapter pub/sub client emitted a protocol error across the whole run', () => {
+    expect(clientErrors).toEqual([]);
   });
 });

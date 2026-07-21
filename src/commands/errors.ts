@@ -56,3 +56,7 @@ export function syntaxError(): RespValue {
 export function invalidCursorError(): RespValue {
   return error('ERR invalid cursor');
 }
+
+export function noProtoError(): RespValue {
+  return error('NOPROTO unsupported protocol version');
+}

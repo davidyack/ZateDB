@@ -131,6 +131,24 @@ export class PubSubRegistry {
     return reached;
   }
 
+  /** Subscriber count for one exact channel — backs PUBSUB NUMSUB. */
+  subscriberCountForChannel(channel: string): number {
+    return this.channels.get(channel)?.size ?? 0;
+  }
+
+  /** Number of distinct active patterns — backs PUBSUB NUMPAT. */
+  patternCount(): number {
+    return this.patterns.size;
+  }
+
+  /** Channel names with at least one subscriber, optionally glob-filtered — backs PUBSUB CHANNELS. */
+  activeChannels(pattern?: string): string[] {
+    const names = Array.from(this.channels.keys());
+    if (pattern === undefined) return names;
+    const regex = globToRegExp(pattern);
+    return names.filter((name) => regex.test(name));
+  }
+
   stats(): PubSubStats {
     let channelSubscriptions = 0;
     for (const set of this.channels.values()) channelSubscriptions += set.size;

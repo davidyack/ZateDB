@@ -9,7 +9,7 @@ import { FakeDurableStore, FakeReplicationHub } from '../helpers/fakeCluster.js'
 
 function fakeConn(): ConnectionContext {
   return {
-    id: 'c', authenticated: true, failedAuthCount: 0, mode: 'command', clientName: null,
+    id: 'c', authenticated: true, failedAuthCount: 0, protover: 2, mode: 'command', clientName: null,
     remoteAddress: '127.0.0.1:0', sendMessage() {}, sendPMessage() {}, totalSubscriptions: () => 0,
   };
 }
