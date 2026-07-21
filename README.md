@@ -62,6 +62,16 @@ script.
 
 ## Deployment
 
+The image is published to GHCR, so there's nothing to build:
+
+```bash
+docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 ghcr.io/davidyack/zatedb:latest
+```
+
+Releases publish `X.Y.Z` and `latest`; merges to `main` publish `edge` and
+`sha-<short>`. Pin a release tag for anything you depend on. To build it
+yourself instead:
+
 ```bash
 docker build -t zatedb:latest .
 docker run -p 6379:6379 -p 8081:8081 -p 8082:8082 zatedb:latest
