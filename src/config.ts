@@ -32,6 +32,18 @@ export interface ServerConfig {
    * see it as active. 0 disables (relies on OS defaults, typically 2h+).
    */
   tcpKeepAliveMs: number;
+  /**
+   * How often, in ms, an idle subscriber-mode connection is sent an
+   * unsolicited heartbeat frame (the same `pong` reply Redis sends a
+   * subscribed RESP2 client for a manual PING). TCP keepalive alone doesn't
+   * help here: managed ingress in front of ZateDB (e.g. Azure Container
+   * Apps' envoy-based proxy) resets its own idle timeout on application-layer
+   * bytes, not kernel-level keepalive ACKs, so a proxy sitting between client
+   * and server still reaps a connection with no real traffic on it. This
+   * pushes real bytes down the wire at an interval well under typical proxy
+   * idle timeouts (Container Apps' default is 5 minutes). 0 disables.
+   */
+  subscriberHeartbeatIntervalMs: number;
   /** Log any command whose execution takes at least this many ms (redacted key), for latency diagnosis. 0 disables. */
   slowCommandLogMs: number;
   /** Max declared bulk-string length the parser will accept for a single argument. */
@@ -138,6 +150,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxFailedAuthAttempts: intFromEnv(env, 'MAX_FAILED_AUTH_ATTEMPTS', 5),
     idleTimeoutMs: intFromEnv(env, 'IDLE_TIMEOUT_MS', 5 * 60_000),
     tcpKeepAliveMs: intFromEnv(env, 'TCP_KEEPALIVE_MS', 30_000),
+    subscriberHeartbeatIntervalMs: intFromEnv(env, 'SUBSCRIBER_HEARTBEAT_INTERVAL_MS', 60_000),
     slowCommandLogMs: intFromEnv(env, 'SLOW_COMMAND_LOG_MS', 0),
     maxBulkBytes: intFromEnv(env, 'MAX_BULK_BYTES', 8 * MiB),
     maxBufferBytes: intFromEnv(env, 'MAX_BUFFER_BYTES', 16 * MiB),

@@ -22,6 +22,19 @@ import {
 } from '../telemetry/commandTelemetry.js';
 import { logger } from '../logger.js';
 
+/**
+ * Channel name used for the idle-subscriber heartbeat (see
+ * ServerConfig.subscriberHeartbeatIntervalMs). Deliberately shaped as a
+ * normal PUBLISH "message" frame rather than an unsolicited reply (e.g. a
+ * bare "pong"): RESP2 pub/sub clients dispatch "message"/"pmessage" frames
+ * by channel lookup with no match required against a pending command queue,
+ * so an unrecognized channel is a harmless no-op. A reply-shaped frame with
+ * no matching request (tried initially) instead crashes node-redis's RESP2
+ * decoder, which assumes every non-pubsub reply corresponds to a queued
+ * command.
+ */
+const HEARTBEAT_CHANNEL = '__zatedb_heartbeat__';
+
 export interface ConnectionDeps {
   store: Store;
   pubsub: PubSubRegistry;
@@ -47,6 +60,7 @@ export class Connection implements ConnectionContext {
 
   private parser: RespRequestParser;
   private closed = false;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly socket: Socket, private readonly deps: ConnectionDeps) {
     this.remoteAddress = `${socket.remoteAddress ?? 'unknown'}:${socket.remotePort ?? 0}`;
@@ -71,6 +85,18 @@ export class Connection implements ConnectionContext {
           this.socket.end();
         }
       });
+    }
+
+    // See ServerConfig.subscriberHeartbeatIntervalMs: TCP keepalive resets
+    // the kernel's idea of "alive" but is invisible to an application-layer
+    // proxy sitting in front of ZateDB, so a subscriber sitting idle behind
+    // one still gets silently reaped. Push real bytes at a fixed cadence
+    // instead — cheap, and harmless if a real client is already active.
+    if (deps.config.subscriberHeartbeatIntervalMs > 0) {
+      this.heartbeatTimer = setInterval(() => {
+        if (this.mode === 'subscriber') this.write(push([bulk('message'), bulk(HEARTBEAT_CHANNEL), bulk('')]));
+      }, deps.config.subscriberHeartbeatIntervalMs);
+      this.heartbeatTimer.unref?.();
     }
 
     socket.on('data', (chunk) => this.onData(chunk));
@@ -160,6 +186,7 @@ export class Connection implements ConnectionContext {
   private onClose(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     const channels = this.deps.pubsub.subscribedChannels(this);
     const patterns = this.deps.pubsub.subscribedPatterns(this);
     this.deps.pubsub.unsubscribeAll(this);
