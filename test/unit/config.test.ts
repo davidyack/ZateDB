@@ -35,6 +35,11 @@ describe('loadConfig', () => {
     expect(config.adminToken).toBeNull();
     expect(config.shutdownHardLimitMs).toBe(10_000);
     expect(config.maxFailedAuthAttempts).toBe(5);
+    expect(config.tcpKeepAliveMs).toBe(30_000);
+  });
+
+  it('reads TCP_KEEPALIVE_MS from the env', () => {
+    expect(loadConfig({ TCP_KEEPALIVE_MS: '15000' } as unknown as NodeJS.ProcessEnv).tcpKeepAliveMs).toBe(15_000);
   });
 
   it('falls back to the default when a numeric env value is not a number', () => {

@@ -14,6 +14,7 @@
 | `MAX_MEMORY_BYTES` | `402653184` (384 MiB) | Estimated keyspace byte ceiling; new-key writes past this are rejected with `-OOM`. Keep it below the container memory limit so the app sheds load before the OOM-killer wipes all state. `0` disables |
 | `MAX_CLIENTS` | `10000` | Max concurrent RESP connections; further connections are refused with `-ERR max number of clients reached`. `0` disables |
 | `IDLE_TIMEOUT_MS` | `300000` (5 min) | Idle (no-traffic) non-subscriber connections are closed after this. Subscribers are exempt. `0` disables |
+| `TCP_KEEPALIVE_MS` | `30000` (30 sec) | TCP keepalive probe delay for accepted RESP connections. Keeps idle pub/sub subscribers from being silently dropped by a NAT/load-balancer idle timeout between client and server. `0` disables (OS default, typically 2h+) |
 | `MAX_BULK_BYTES` | `8388608` (8 MiB) | Max declared length of a single RESP bulk string; a larger header is a protocol error |
 | `MAX_BUFFER_BYTES` | `16777216` (16 MiB) | Max unparsed bytes buffered per connection before the connection is killed |
 | `MAX_OUTBOUND_BUFFER_BYTES` | `33554432` (32 MiB) | Outbound socket buffer high-water mark; a slow consumer exceeding it is disconnected |

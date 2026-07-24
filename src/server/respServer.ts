@@ -52,6 +52,11 @@ export class RespServer {
       socket.destroy();
       return;
     }
+    // See ServerConfig.tcpKeepAliveMs: without this, an idle pub/sub
+    // subscriber connection can be silently dropped by a middlebox (NAT/LB)
+    // idle timeout well before either end notices.
+    if (this.config.tcpKeepAliveMs > 0) socket.setKeepAlive(true, this.config.tcpKeepAliveMs);
+
     const conn = new Connection(socket, { store: this.store, pubsub: this.pubsub, config: this.config, cluster: this.cluster });
     this.connections.add(conn);
     socket.on('close', () => this.connections.delete(conn));

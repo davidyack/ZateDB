@@ -21,6 +21,17 @@ export interface ServerConfig {
   maxFailedAuthAttempts: number;
   /** Idle (no-traffic) timeout in ms after which a non-subscriber connection is closed. 0 disables. */
   idleTimeoutMs: number;
+  /**
+   * TCP keepalive probe delay in ms for accepted RESP connections. Pub/sub
+   * subscribers can sit idle (no application-level traffic) far longer than
+   * any single command round-trip, which is exactly the pattern a stateful
+   * NAT gateway or load balancer between client and server silently reaps
+   * after its own idle timeout (5 minutes is a common default) — the socket
+   * looks fine to both ends until the next write fails. OS-level keepalive
+   * probes generate traffic on a truly idle connection so those middleboxes
+   * see it as active. 0 disables (relies on OS defaults, typically 2h+).
+   */
+  tcpKeepAliveMs: number;
   /** Log any command whose execution takes at least this many ms (redacted key), for latency diagnosis. 0 disables. */
   slowCommandLogMs: number;
   /** Max declared bulk-string length the parser will accept for a single argument. */
@@ -126,6 +137,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxClients: intFromEnv(env, 'MAX_CLIENTS', 10_000),
     maxFailedAuthAttempts: intFromEnv(env, 'MAX_FAILED_AUTH_ATTEMPTS', 5),
     idleTimeoutMs: intFromEnv(env, 'IDLE_TIMEOUT_MS', 5 * 60_000),
+    tcpKeepAliveMs: intFromEnv(env, 'TCP_KEEPALIVE_MS', 30_000),
     slowCommandLogMs: intFromEnv(env, 'SLOW_COMMAND_LOG_MS', 0),
     maxBulkBytes: intFromEnv(env, 'MAX_BULK_BYTES', 8 * MiB),
     maxBufferBytes: intFromEnv(env, 'MAX_BUFFER_BYTES', 16 * MiB),
