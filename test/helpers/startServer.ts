@@ -43,6 +43,7 @@ export async function startTestServer(overrides: Partial<ServerConfig> = {}, ha?
     maxClients: 0,
     idleTimeoutMs: 0,
     tcpKeepAliveMs: 0,
+    subscriberHeartbeatIntervalMs: 0,
     maxBulkBytes: 0,
     maxBufferBytes: 0,
     outboundHighWaterMarkBytes: 0,
