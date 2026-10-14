@@ -1,8 +1,9 @@
 import type { Store } from '../store/store.js';
+import { SEED_ORIGIN } from '../store/store.js';
 import type { PubSubRegistry } from '../pubsub/registry.js';
 import type { DurableStore } from './durableStore.js';
 import type { ReplicationTransport } from './replicationTransport.js';
-import type { NodeSnapshot, ReplicationEvent } from './types.js';
+import type { FloatContributionTuple, NodeSnapshot, ReplicationEvent } from './types.js';
 import { validateReplicationEvent } from './types.js';
 import { entryToSnapshot, snapshotToEntry } from './snapshot.js';
 import { redactKey } from '../telemetry/commandTelemetry.js';
@@ -19,6 +20,8 @@ interface FieldPayload {
   type: 'hash' | 'zset';
   set: Map<string, string | number>;
   del: Set<string>;
+  /** Hash fields that were HINCRBYFLOAT counters before this HSET/HDEL — their durable counter state must be cleared too. */
+  clearCounters: Set<string>;
 }
 
 /**
@@ -41,6 +44,7 @@ function mergeFieldPayload(acc: FieldPayload, next: FieldPayload): void {
     acc.del.add(name);
     acc.set.delete(name);
   }
+  for (const name of next.clearCounters) acc.clearCounters.add(name);
 }
 
 /**
@@ -54,7 +58,9 @@ function mergeFieldPayload(acc: FieldPayload, next: FieldPayload): void {
  * order.
  */
 interface ReplicationTask {
-  coalesceClass: 'whole' | 'ttl' | 'field' | 'incr';
+  coalesceClass: 'whole' | 'ttl' | 'field' | 'incr' | 'hincr';
+  /** Narrows coalescing within a class — 'hincr' tasks only supersede a queued task for the same hash field. */
+  coalesceId?: string;
   run: () => Promise<void>;
   /** Present only for the 'field' class — the accumulator later field tasks merge into. */
   field?: FieldPayload;
@@ -361,6 +367,43 @@ export class ClusterCoordinator {
     }
   }
 
+  /**
+   * Call after a successful HINCRBYFLOAT. Replicates this node's cumulative
+   * PN contribution to the hash field (see Store.applyReplicatedHashFieldIncrement)
+   * so concurrent debits/credits on different nodes add up instead of the
+   * last field write winning. Coalesces per field ('hincr' + field): a later
+   * cumulative contribution supersedes a queued earlier one.
+   */
+  publishHashFieldIncrement(key: string, field: string): void {
+    if (!this.haEnabled) return;
+    const c = this.deps.store.hashFieldContributionFor(key, field, this.nodeId);
+    if (c === undefined) return;
+    const contribution: FloatContributionTuple = [c.p, c.n];
+    // The shared base an HSET left (SEED_ORIGIN) — identical on every node,
+    // so whichever node first creates the durable counter records it.
+    const seed = this.deps.store.hashFieldContributionFor(key, field, SEED_ORIGIN);
+    const seedTuple: FloatContributionTuple | null = seed ? [seed.p, seed.n] : null;
+    this.enqueueForKey(key, 'hincr', () => this.doPublishHashFieldIncrement(key, field, contribution, seedTuple), field);
+  }
+
+  private async doPublishHashFieldIncrement(
+    key: string,
+    field: string,
+    contribution: FloatContributionTuple,
+    seed: FloatContributionTuple | null,
+  ): Promise<void> {
+    const broadcast = this.deps.transport.publish(this.makeEvent({ kind: 'hashFieldIncrement', key, field, floatContribution: contribution }));
+    const entry = this.deps.store.getRawEntry(key);
+    if (this.skipDurableForTtl(entry?.expiresAtMs)) {
+      await broadcast;
+      return;
+    }
+    // The durable field value is informational (hydration recomputes it
+    // from the contributions); write this node's current view of it.
+    const value = entry?.type === 'hash' ? (entry.fields.get(field) ?? '0') : '0';
+    await Promise.all([this.deps.durable.putHashFieldIncrement(key, field, this.nodeId, contribution, value, seed), broadcast]);
+  }
+
   private async doPublishKeyChange(key: string, entry: ReturnType<Store['getRawEntry']>): Promise<void> {
     // The Cosmos DB write and the Service Bus broadcast are independent —
     // peers apply the broadcast event directly, they don't read it back
@@ -402,16 +445,28 @@ export class ClusterCoordinator {
    * (not the whole hash) is what lets two nodes set *different* fields of
    * the same key concurrently without either write clobbering the other.
    */
-  publishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): void {
+  publishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[], clearedCounterFields: string[] = []): void {
     if (!this.haEnabled || (setFields.length === 0 && deletedFields.length === 0)) return;
-    this.enqueueFieldForKey(key, { type: 'hash', set: new Map(setFields), del: new Set(deletedFields) });
+    this.enqueueFieldForKey(key, { type: 'hash', set: new Map(setFields), del: new Set(deletedFields), clearCounters: new Set(clearedCounterFields) });
   }
 
-  private async doPublishHashFieldChange(key: string, setFields: Array<[string, string]>, deletedFields: string[]): Promise<void> {
+  private async doPublishHashFieldChange(
+    key: string,
+    setFields: Array<[string, string]>,
+    deletedFields: string[],
+    clearCounters: string[],
+  ): Promise<void> {
     const tasks: Array<Promise<unknown>> = [this.deps.transport.publish(this.makeEvent({ kind: 'hashField', key, setFields, deletedFields }))];
     if (!this.skipDurableForTtl(this.deps.store.getRawEntry(key)?.expiresAtMs)) {
-      if (setFields.length > 0) tasks.push(this.deps.durable.putHashFields(key, setFields));
-      if (deletedFields.length > 0) tasks.push(this.deps.durable.deleteHashFields(key, deletedFields));
+      const fieldWrites: Array<Promise<unknown>> = [];
+      if (setFields.length > 0) fieldWrites.push(this.deps.durable.putHashFields(key, setFields));
+      if (deletedFields.length > 0) fieldWrites.push(this.deps.durable.deleteHashFields(key, deletedFields));
+      // Peers drop counter state on the replicated HSET/HDEL itself; the
+      // durable doc needs it removed explicitly, or hydration would rebuild
+      // the old counter over the reset value.
+      tasks.push(
+        Promise.all(fieldWrites).then(() => (clearCounters.length > 0 ? this.deps.durable.deleteHashFieldCounters(key, clearCounters) : undefined)),
+      );
     }
     await Promise.all(tasks);
   }
@@ -419,7 +474,7 @@ export class ClusterCoordinator {
   /** Same idea as publishHashFieldChange, for ZADD/ZREMRANGEBYSCORE — see that method's doc comment. */
   publishZsetMemberChange(key: string, setMembers: Array<[string, number]>, deletedMembers: string[]): void {
     if (!this.haEnabled || (setMembers.length === 0 && deletedMembers.length === 0)) return;
-    this.enqueueFieldForKey(key, { type: 'zset', set: new Map(setMembers), del: new Set(deletedMembers) });
+    this.enqueueFieldForKey(key, { type: 'zset', set: new Map(setMembers), del: new Set(deletedMembers), clearCounters: new Set() });
   }
 
   /**
@@ -452,7 +507,7 @@ export class ClusterCoordinator {
   private doPublishFieldPayload(key: string, field: FieldPayload): Promise<void> {
     const del = [...field.del];
     if (field.type === 'hash') {
-      return this.doPublishHashFieldChange(key, [...field.set].map(([f, v]) => [f, v as string]), del);
+      return this.doPublishHashFieldChange(key, [...field.set].map(([f, v]) => [f, v as string]), del, [...field.clearCounters]);
     }
     return this.doPublishZsetMemberChange(key, [...field.set].map(([m, s]) => [m, s as number]), del);
   }
@@ -493,20 +548,20 @@ export class ClusterCoordinator {
    * never coalesce across each other, so ordering across a SET/EXPIRE/HSET
    * mix is preserved.
    */
-  private enqueueForKey(key: string, coalesceClass: ReplicationTask['coalesceClass'], run: () => Promise<void>): void {
+  private enqueueForKey(key: string, coalesceClass: ReplicationTask['coalesceClass'], run: () => Promise<void>, coalesceId?: string): void {
     let queue = this.replicationQueue.get(key);
     if (queue === undefined) {
       queue = [];
       this.replicationQueue.set(key, queue);
     }
     const tail = queue[queue.length - 1];
-    if (tail !== undefined && coalesceClass !== 'field' && tail.coalesceClass === coalesceClass) {
+    if (tail !== undefined && coalesceClass !== 'field' && tail.coalesceClass === coalesceClass && tail.coalesceId === coalesceId) {
       // The tail hasn't started yet (the running task was already shifted
       // off the front), so replacing it drops a redundant write, never an
       // in-flight one.
-      queue[queue.length - 1] = { coalesceClass, run };
+      queue[queue.length - 1] = { coalesceClass, coalesceId, run };
     } else {
-      queue.push({ coalesceClass, run });
+      queue.push({ coalesceClass, coalesceId, run });
     }
     if (!this.draining.has(key)) this.startDraining(key);
   }
@@ -552,6 +607,9 @@ export class ClusterCoordinator {
         this.deps.store.applyReplicatedTtl(event.key, event.expiresAtMs);
       } else if (event.kind === 'increment' && event.key !== undefined && event.contributionTotal !== undefined) {
         this.deps.store.applyReplicatedIncrement(event.key, event.originNodeId, event.contributionTotal);
+      } else if (event.kind === 'hashFieldIncrement' && event.key !== undefined && event.field !== undefined && event.floatContribution !== undefined) {
+        const [p, n] = event.floatContribution;
+        this.deps.store.applyReplicatedHashFieldIncrement(event.key, event.field, event.originNodeId, { p, n });
       } else if (event.kind === 'publish' && event.channel !== undefined && event.message !== undefined) {
         this.deps.pubsub.publish(event.channel, event.message);
       } else if (event.kind === 'hashField' && event.key !== undefined) {

@@ -48,12 +48,22 @@ export interface CommandSpec {
    * failure). Routes to ClusterCoordinator.publishIncrement.
    */
   incrementReplication?: boolean;
+  /**
+   * HINCRBYFLOAT replicates as a per-origin PN-counter contribution to one
+   * hash field (signed, fractional) rather than a last-write-wins field set,
+   * so concurrent debits on different nodes add up. Routes to
+   * ClusterCoordinator.publishHashFieldIncrement.
+   */
+  hashIncrementReplication?: boolean;
 }
 
 function spec(
   handler: CommandHandler,
   opts: Partial<
-    Pick<CommandSpec, 'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys' | 'fieldReplication' | 'ttlReplication' | 'incrementReplication'>
+    Pick<
+      CommandSpec,
+      'allowedPreAuth' | 'allowedInSubscriberMode' | 'mutatedKeys' | 'fieldReplication' | 'ttlReplication' | 'incrementReplication' | 'hashIncrementReplication'
+    >
   > = {},
 ): CommandSpec {
   return {
@@ -64,6 +74,7 @@ function spec(
     fieldReplication: opts.fieldReplication,
     ttlReplication: opts.ttlReplication,
     incrementReplication: opts.incrementReplication,
+    hashIncrementReplication: opts.hashIncrementReplication,
   };
 }
 
@@ -96,6 +107,8 @@ export const COMMANDS: Record<string, CommandSpec> = {
   HSET: spec(hashCommands.hset, { fieldReplication: 'hash' }),
   HDEL: spec(hashCommands.hdel, { fieldReplication: 'hash' }),
   HGETALL: spec(hashCommands.hgetall),
+  HMGET: spec(hashCommands.hmget),
+  HINCRBYFLOAT: spec(hashCommands.hincrbyfloat, { hashIncrementReplication: true }),
 
   ZADD: spec(sortedSetCommands.zadd, { fieldReplication: 'zset' }),
   ZREMRANGEBYSCORE: spec(sortedSetCommands.zremrangebyscore, { fieldReplication: 'zset' }),
@@ -135,16 +148,20 @@ export interface DispatchOutcome extends CommandResult {
 interface FieldReplicationPrep {
   hashFieldsBefore: Set<string> | null;
   zsetMembersBefore: Set<string> | null;
+  /** HSET/HDEL: fields that were HINCRBYFLOAT counters before the command, so their durable counter state gets cleared too. */
+  hashCounterFieldsBefore: Set<string> | null;
 }
 
 function prepareFieldReplication(ctx: CommandContext, command: string, key: string): FieldReplicationPrep {
+  const hashCounterFieldsBefore = command === 'HSET' || command === 'HDEL' ? ctx.store.hashCounterFields(key) : null;
   if (command !== 'HDEL' && command !== 'ZREMRANGEBYSCORE') {
-    return { hashFieldsBefore: null, zsetMembersBefore: null };
+    return { hashFieldsBefore: null, zsetMembersBefore: null, hashCounterFieldsBefore };
   }
   const entry = ctx.store.getRawEntry(key);
   return {
     hashFieldsBefore: command === 'HDEL' && entry?.type === 'hash' ? new Set(entry.fields.keys()) : null,
     zsetMembersBefore: command === 'ZREMRANGEBYSCORE' && entry?.type === 'sortedset' ? new Set(entry.members.keys()) : null,
+    hashCounterFieldsBefore,
   };
 }
 
@@ -178,14 +195,14 @@ function replicateFieldLevelMutation(ctx: CommandContext, command: string, args:
       const value = entry.fields.get(field);
       if (value !== undefined) setFields.push([field, value]);
     }
-    ctx.cluster.publishHashFieldChange(key, setFields, []);
+    ctx.cluster.publishHashFieldChange(key, setFields, [], countersCleared(setFields.map(([f]) => f), prep));
     return;
   }
 
   if (command === 'HDEL') {
     const requested = args.slice(1);
     const actuallyRemoved = prep.hashFieldsBefore ? requested.filter((field) => prep.hashFieldsBefore!.has(field)) : [];
-    if (actuallyRemoved.length > 0) ctx.cluster.publishHashFieldChange(key, [], actuallyRemoved);
+    if (actuallyRemoved.length > 0) ctx.cluster.publishHashFieldChange(key, [], actuallyRemoved, countersCleared(actuallyRemoved, prep));
     return;
   }
 
@@ -209,6 +226,12 @@ function replicateFieldLevelMutation(ctx: CommandContext, command: string, args:
     const removed = Array.from(prep.zsetMembersBefore).filter((member) => !afterMembers?.has(member));
     if (removed.length > 0) ctx.cluster.publishZsetMemberChange(key, [], removed);
   }
+}
+
+/** The subset of `fields` that carried HINCRBYFLOAT counter state before the command ran. */
+function countersCleared(fields: string[], prep: FieldReplicationPrep): string[] {
+  const before = prep.hashCounterFieldsBefore;
+  return before && before.size > 0 ? [...new Set(fields)].filter((f) => before.has(f)) : [];
 }
 
 /** True when a command's reply is the integer `:1` — how EXPIRE/PEXPIRE signal "the TTL was actually applied". */
@@ -290,6 +313,8 @@ export function runCommand(ctx: CommandContext, command: string, args: string[],
       // INCR always mutates (creates or increments), so there's no no-op to
       // filter — replicate this node's new cumulative contribution.
       ctx.cluster.publishIncrement(args[0]);
+    } else if (ctx.cluster.haEnabled && cmdSpec.hashIncrementReplication) {
+      ctx.cluster.publishHashFieldIncrement(args[0], args[1]);
     } else if (ctx.cluster.haEnabled && cmdSpec.ttlReplication) {
       // Replicate only when the TTL actually changed. EXPIRE/PEXPIRE reply
       // :1 when they applied and :0 when they didn't (key absent, or an

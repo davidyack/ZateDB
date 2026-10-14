@@ -46,6 +46,8 @@ const METHOD_TO_COMMAND: Record<string, string> = {
   hSet: 'HSET',
   hDel: 'HDEL',
   hGetAll: 'HGETALL',
+  hmGet: 'HMGET',
+  hIncrByFloat: 'HINCRBYFLOAT',
   zAdd: 'ZADD',
   zRemRangeByScore: 'ZREMRANGEBYSCORE',
   zCount: 'ZCOUNT',

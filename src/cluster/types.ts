@@ -15,10 +15,19 @@ import type { EntryTypeName } from '../store/types.js';
  */
 export type EntrySnapshot =
   | { type: 'string'; value: string; expiresAtMs: number | null; contributions?: Record<string, number> }
-  | { type: 'hash'; fields: Record<string, string>; expiresAtMs: number | null }
+  | {
+      type: 'hash';
+      fields: Record<string, string>;
+      expiresAtMs: number | null;
+      /** HINCRBYFLOAT field counters: field -> origin -> [positive total, negative magnitude]. See HashEntry.counters. */
+      counters?: Record<string, Record<string, FloatContributionTuple>>;
+    }
   | { type: 'sortedset'; members: Record<string, number>; expiresAtMs: number | null };
 
-export type ReplicationEventKind = 'upsert' | 'delete' | 'ttl' | 'increment' | 'publish' | 'hashField' | 'zsetMember';
+/** Wire/durable form of a FloatContribution: `[p, n]`, both non-negative. */
+export type FloatContributionTuple = [number, number];
+
+export type ReplicationEventKind = 'upsert' | 'delete' | 'ttl' | 'increment' | 'hashFieldIncrement' | 'publish' | 'hashField' | 'zsetMember';
 
 /**
  * A single fact broadcast over the replication transport: "key X is now
@@ -52,6 +61,15 @@ export interface ReplicationEvent {
    * make the counter drift. See Store.applyReplicatedIncrement.
    */
   contributionTotal?: number;
+  /** For 'hashFieldIncrement' — the hash field a HINCRBYFLOAT touched. */
+  field?: string;
+  /**
+   * For 'hashFieldIncrement' — the originating node's cumulative PN
+   * contribution to that field (`[positive total, negative magnitude]`),
+   * merged by max on each half. Same reasoning as contributionTotal, extended
+   * to signed fractional increments. See Store.applyReplicatedHashFieldIncrement.
+   */
+  floatContribution?: FloatContributionTuple;
   channel?: string;
   message?: string;
   /** For 'hashField' — field/value pairs that were set (HSET). */
@@ -94,9 +112,16 @@ function isValidSnapshot(x: unknown): x is EntrySnapshot {
     if (s.contributions !== undefined && !isNumberRecord(s.contributions)) return false;
     return true;
   }
-  if (s.type === 'hash') return isRecordOf(s.fields, isEventString);
+  if (s.type === 'hash') {
+    if (!isRecordOf(s.fields, isEventString)) return false;
+    if (s.counters !== undefined && !isRecordOf(s.counters, (c) => isRecordOf(c, isFloatContributionTuple))) return false;
+    return true;
+  }
   if (s.type === 'sortedset') return isNumberRecord(s.members);
   return false;
+}
+function isFloatContributionTuple(x: unknown): x is FloatContributionTuple {
+  return Array.isArray(x) && x.length === 2 && isFiniteNumber(x[0]) && isFiniteNumber(x[1]) && x[0] >= 0 && x[1] >= 0;
 }
 function isRecordOf(x: unknown, valueOk: (v: unknown) => boolean): boolean {
   if (typeof x !== 'object' || x === null) return false;
@@ -137,6 +162,9 @@ export function validateReplicationEvent(raw: unknown): ReplicationEvent | null 
       break;
     case 'increment':
       if (!isEventString(e.key) || !isFiniteNumber(e.contributionTotal)) return null;
+      break;
+    case 'hashFieldIncrement':
+      if (!isEventString(e.key) || !isEventString(e.field) || !isFloatContributionTuple(e.floatContribution)) return null;
       break;
     case 'publish':
       if (!isEventString(e.channel) || !isEventString(e.message)) return null;

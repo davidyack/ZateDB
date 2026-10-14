@@ -1,5 +1,6 @@
-import type { Entry, EntryTypeName, HashEntry, SortedSetEntry, StringEntry } from './types.js';
-import { NotAnIntegerError, OutOfMemoryError, WrongTypeError } from './types.js';
+import type { Entry, EntryTypeName, FloatContribution, HashEntry, SortedSetEntry, StringEntry } from './types.js';
+import { FloatOverflowError, NotAFloatError, NotAnIntegerError, OutOfMemoryError, WrongTypeError } from './types.js';
+import { baseContribution, formatRedisFloat, parseRedisFloat, sumFloatContributions } from './floatCounter.js';
 import type { ScoreBound } from './scoreRange.js';
 import { scoreInRange } from './scoreRange.js';
 import { logger } from '../logger.js';
@@ -373,6 +374,9 @@ export class Store {
     for (const [field, value] of pairs) {
       if (!entry.fields.has(field)) added++;
       entry.fields.set(field, value);
+      // HSET is a last-write-wins reset: a field that was a HINCRBYFLOAT
+      // counter becomes a plain value again (re-seeded on the next increment).
+      dropCounter(entry, field);
     }
     this.memoryBytes += estimateEntrySize(key, entry) - before;
     return added;
@@ -385,6 +389,7 @@ export class Store {
     let removed = 0;
     for (const field of fields) {
       if (entry.fields.delete(field)) removed++;
+      dropCounter(entry, field);
     }
     if (entry.fields.size === 0) {
       this.remove(key);
@@ -400,7 +405,71 @@ export class Store {
     return Array.from(entry.fields.entries());
   }
 
-  // ---- sorted sets --------------------------------------------------------
+  /** HMGET: one value per requested field, in order; null for a missing field or a missing key. WRONGTYPE on a non-hash key, as in Redis. */
+  hmget(key: string, fields: string[]): (string | null)[] {
+    const entry = this.requireType<HashEntry>(key, 'hash');
+    return fields.map((field) => entry?.fields.get(field) ?? null);
+  }
+
+  /**
+   * HINCRBYFLOAT: adds `increment` (may be negative/fractional) to a hash
+   * field and returns the new value, formatted as Redis does. The field is
+   * modelled as a PN-counter attributed to `originId` (see
+   * HashEntry.counters) so concurrent increments on different nodes
+   * replicate additively instead of last-write-wins — the per-origin
+   * analogue of INCR, for fractional, signed amounts. A plain value already
+   * in the field (from HSET) is parked under SEED_ORIGIN as the base.
+   */
+  hincrbyfloat(key: string, field: string, increment: number, originId: string = LOCAL_ORIGIN): string {
+    let entry = this.requireType<HashEntry>(key, 'hash');
+    let created = false;
+    if (!entry) {
+      this.ensureRoomForNewKey();
+      entry = { type: 'hash', fields: new Map(), expiresAtMs: null };
+      created = true;
+    }
+    let contributions = entry.counters?.get(field);
+    if (contributions === undefined) {
+      contributions = new Map();
+      const current = entry.fields.get(field);
+      if (current !== undefined) {
+        const base = parseRedisFloat(current);
+        if (base === null) throw new NotAFloatError();
+        if (base !== 0) contributions.set(SEED_ORIGIN, baseContribution(base));
+      }
+    }
+    const prev = contributions.get(originId) ?? { p: 0, n: 0 };
+    const next: FloatContribution = increment >= 0 ? { p: prev.p + increment, n: prev.n } : { p: prev.p, n: prev.n - increment };
+    if (!Number.isFinite(next.p) || !Number.isFinite(next.n)) throw new FloatOverflowError();
+    contributions.set(originId, next);
+    const total = sumFloatContributions(contributions);
+    if (!Number.isFinite(total)) {
+      if (prev.p === 0 && prev.n === 0) contributions.delete(originId);
+      else contributions.set(originId, prev); // roll back the increment we can't represent
+      throw new FloatOverflowError();
+    }
+    const value = formatRedisFloat(total);
+    if (created) {
+      entry.fields.set(field, value);
+      (entry.counters ??= new Map()).set(field, contributions);
+      this.put(key, entry);
+      return value;
+    }
+    const before = estimateEntrySize(key, entry);
+    entry.fields.set(field, value);
+    (entry.counters ??= new Map()).set(field, contributions);
+    this.memoryBytes += estimateEntrySize(key, entry) - before;
+    return value;
+  }
+
+  /** Fields of a hash currently carrying HINCRBYFLOAT counter state — captured before HSET/HDEL so replication can clear that state durably. */
+  hashCounterFields(key: string): Set<string> {
+    const entry = this.getLive(key);
+    if (entry?.type !== 'hash' || entry.counters === undefined) return new Set();
+    return new Set(entry.counters.keys());
+  }
+
+    // ---- sorted sets --------------------------------------------------------
 
   zadd(key: string, pairs: Array<[number, string]>): number {
     let entry = this.requireType<SortedSetEntry>(key, 'sortedset');
@@ -559,7 +628,61 @@ export class Store {
       this.memoryBytes += estimateEntrySize(key, existing) - before;
       return;
     }
+    // Same reasoning for HINCRBYFLOAT field counters: a durable hash snapshot
+    // (hydration / anti-entropy) can lag this node's own not-yet-persisted
+    // increments, so counters merge per origin by max instead of reverting.
+    // A local counter the snapshot doesn't carry at all is kept too —
+    // dropping it would lose this node's cumulative contribution, after
+    // which its next increment would replicate a *smaller* total that peers
+    // (max-merging) ignore. Plain fields still take the snapshot's value.
+    if (entry.type === 'hash' && existing?.type === 'hash' && existing.counters) {
+      for (const [field, local] of existing.counters) {
+        const incoming = entry.counters?.get(field);
+        const merged = new Map(local);
+        if (incoming) {
+          for (const [origin, c] of incoming) mergeContribution(merged, origin, c);
+        }
+        (entry.counters ??= new Map()).set(field, merged);
+        entry.fields.set(field, formatRedisFloat(sumFloatContributions(merged)));
+      }
+    }
     this.put(key, entry);
+  }
+
+  /**
+   * Applies a replicated HINCRBYFLOAT — folds one origin's PN contribution to
+   * a hash field into the local counter by max on each half, so duplicated,
+   * reordered, or already-snapshotted events are idempotent. Creates the
+   * hash/field if absent and seeds an existing plain float value under
+   * SEED_ORIGIN, exactly like local HINCRBYFLOAT (a non-float plain value
+   * seeds 0 — the origin already accepted the write). Bypasses admission
+   * control; a no-op if the key holds a non-hash type.
+   */
+  applyReplicatedHashFieldIncrement(key: string, field: string, originId: string, contribution: FloatContribution): void {
+    const existing = this.data.get(key);
+    if (existing !== undefined && existing.type !== 'hash') return;
+    const entry: HashEntry = existing ?? { type: 'hash', fields: new Map(), expiresAtMs: null };
+    const before = existing ? estimateEntrySize(key, existing) : 0;
+    let contributions = entry.counters?.get(field);
+    if (contributions === undefined) {
+      contributions = new Map();
+      const current = entry.fields.get(field);
+      const base = current === undefined ? null : parseRedisFloat(current);
+      if (base !== null && base !== 0) contributions.set(SEED_ORIGIN, baseContribution(base));
+      (entry.counters ??= new Map()).set(field, contributions);
+    }
+    mergeContribution(contributions, originId, contribution);
+    entry.fields.set(field, formatRedisFloat(sumFloatContributions(contributions)));
+    if (existing === undefined) this.put(key, entry);
+    else this.memoryBytes += estimateEntrySize(key, entry) - before;
+  }
+
+  /** This origin's PN contribution to a hash field counter, for replicating a HINCRBYFLOAT. Undefined if absent/not a counter. */
+  hashFieldContributionFor(key: string, field: string, originId: string): FloatContribution | undefined {
+    const entry = this.getLive(key);
+    if (entry?.type !== 'hash') return undefined;
+    const c = entry.counters?.get(field)?.get(originId);
+    return c === undefined ? undefined : { ...c };
   }
 
   /**
@@ -646,7 +769,10 @@ export class Store {
     const existing = this.data.get(key);
     if (existing?.type === 'hash') {
       const before = estimateEntrySize(key, existing);
-      for (const [field, value] of fields) existing.fields.set(field, value);
+      for (const [field, value] of fields) {
+        existing.fields.set(field, value);
+        dropCounter(existing, field); // a replicated HSET resets a counter field, as local HSET does
+      }
       this.memoryBytes += estimateEntrySize(key, existing) - before;
       return;
     }
@@ -661,7 +787,10 @@ export class Store {
     const entry = this.data.get(key);
     if (!entry || entry.type !== 'hash') return;
     const before = estimateEntrySize(key, entry);
-    for (const field of fields) entry.fields.delete(field);
+    for (const field of fields) {
+      entry.fields.delete(field);
+      dropCounter(entry, field);
+    }
     if (entry.fields.size === 0) {
       this.remove(key);
     } else {
@@ -712,8 +841,26 @@ function estimateEntrySize(key: string, entry: Entry): number {
     }
   } else if (entry.type === 'hash') {
     for (const [f, v] of entry.fields) size += (f.length + v.length) * 2 + 16;
+    if (entry.counters) {
+      for (const contributions of entry.counters.values()) {
+        for (const [origin] of contributions) size += origin.length * 2 + 32;
+      }
+    }
   } else {
     for (const [m] of entry.members) size += m.length * 2 + 24;
   }
   return size;
+}
+
+/** Removes a hash field's HINCRBYFLOAT counter state (HSET reset / HDEL), dropping the counters map once empty. */
+function dropCounter(entry: HashEntry, field: string): void {
+  if (entry.counters === undefined) return;
+  entry.counters.delete(field);
+  if (entry.counters.size === 0) entry.counters = undefined;
+}
+
+/** Folds one origin's PN contribution in by max on each half — commutative and idempotent. */
+function mergeContribution(contributions: Map<string, FloatContribution>, origin: string, c: FloatContribution): void {
+  const prev = contributions.get(origin);
+  contributions.set(origin, prev === undefined ? { p: c.p, n: c.n } : { p: Math.max(prev.p, c.p), n: Math.max(prev.n, c.n) });
 }

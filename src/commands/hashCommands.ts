@@ -1,5 +1,6 @@
-import { bulk, error, integer } from '../resp/types.js';
-import { OutOfMemoryError, WrongTypeError } from '../store/types.js';
+import { array, bulk, error, integer } from '../resp/types.js';
+import { FloatOverflowError, NotAFloatError, OutOfMemoryError, WrongTypeError } from '../store/types.js';
+import { parseRedisFloat } from '../store/floatCounter.js';
 import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
 import { wrongArgsError } from './errors.js';
@@ -39,6 +40,36 @@ export function hgetall(ctx: CommandContext, args: string[]): CommandResult {
     return result({ type: 'map', value: pairs.map(([f, v]) => [bulk(f), bulk(v)]) });
   } catch (e) {
     if (e instanceof WrongTypeError) return result(error(e.message));
+    throw e;
+  }
+}
+
+export function hmget(ctx: CommandContext, args: string[]): CommandResult {
+  if (args.length < 2) return result(wrongArgsError('hmget'));
+  const [key, ...fields] = args;
+  try {
+    // One entry per requested field, in request order; a missing field or
+    // key is a nil bulk — which a script sees as `false`, as in Redis.
+    return result(array(ctx.store.hmget(key, fields).map((v) => bulk(v))));
+  } catch (e) {
+    if (e instanceof WrongTypeError) return result(error(e.message));
+    throw e;
+  }
+}
+
+export function hincrbyfloat(ctx: CommandContext, args: string[]): CommandResult {
+  if (args.length !== 3) return result(wrongArgsError('hincrbyfloat'));
+  const [key, field, incrementRaw] = args;
+  const increment = parseRedisFloat(incrementRaw);
+  if (increment === null) return result(error('ERR value is not a valid float'));
+  try {
+    // Attributed to this node so the field replicates as a per-origin
+    // PN-counter contribution (see Store.hincrbyfloat), not a field write.
+    return result(bulk(ctx.store.hincrbyfloat(key, field, increment, ctx.cluster.nodeId)));
+  } catch (e) {
+    if (e instanceof WrongTypeError || e instanceof OutOfMemoryError || e instanceof NotAFloatError || e instanceof FloatOverflowError) {
+      return result(error(e.message));
+    }
     throw e;
   }
 }

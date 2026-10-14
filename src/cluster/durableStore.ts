@@ -1,4 +1,4 @@
-import type { EntrySnapshot, NodeSnapshot } from './types.js';
+import type { EntrySnapshot, FloatContributionTuple, NodeSnapshot } from './types.js';
 
 /**
  * The durable backing store: the source of truth a node hydrates from at
@@ -34,6 +34,32 @@ export interface DurableStore {
    * the running total (idempotent), not added. Creates the counter if absent.
    */
   putIncrement(key: string, originId: string, originTotal: number): Promise<void>;
+
+  /**
+   * Persists one origin's cumulative PN contribution to a hash field counter
+   * (HINCRBYFLOAT) without touching any other origin's or any other field —
+   * the durable counterpart of Store.applyReplicatedHashFieldIncrement.
+   * Also writes `fieldValue` (this node's current view of the field) so the
+   * plain field stays readable; hydration recomputes it from the
+   * contributions regardless. Idempotent (sets the running total, doesn't
+   * add). Creates the hash/field counter if absent, recording `seed` (the
+   * shared base an HSET left, under SEED_ORIGIN '') when it does so.
+   */
+  putHashFieldIncrement(
+    key: string,
+    field: string,
+    originId: string,
+    contribution: FloatContributionTuple,
+    fieldValue: string,
+    seed: FloatContributionTuple | null,
+  ): Promise<void>;
+
+  /**
+   * Drops the HINCRBYFLOAT counter state of specific hash fields (after an
+   * HSET reset or HDEL of a field that was a counter), leaving the field
+   * values themselves alone. A no-op for fields/keys without counter state.
+   */
+  deleteHashFieldCounters(key: string, fields: string[]): Promise<void>;
 
   /** Permanently removes a key. Idempotent — a missing key is not an error. */
   deleteKey(key: string): Promise<void>;
@@ -90,6 +116,10 @@ export class NullDurableStore implements DurableStore {
   async putKey(): Promise<void> {}
 
   async putIncrement(): Promise<void> {}
+
+  async putHashFieldIncrement(): Promise<void> {}
+
+  async deleteHashFieldCounters(): Promise<void> {}
 
   async deleteKey(): Promise<void> {}
 
