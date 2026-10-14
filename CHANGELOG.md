@@ -6,6 +6,8 @@ All notable changes to ZateDB are documented here. Versions are tagged
 
 ## Unreleased
 
+## 0.1.2
+
 - **New: `HMGET`** — one reply per requested field, nil for missing
   fields/keys (`false` in Lua). Read-only; callable from `redis.call`.
   Unblocks the shared token-bucket rate-limit script, which was failing with
@@ -19,6 +21,18 @@ All notable changes to ZateDB are documented here. Versions are tagged
   kind `hashFieldIncrement` and an optional `counters` property on durable
   hash documents; nodes must all run this version before the command is used
   (an older node drops the unknown event kind).
+- **New: TCP keepalive on RESP connections** (`TCP_KEEPALIVE_MS`, default
+  30 s) so stateful NAT/load balancers don't silently reap idle sockets.
+- **New: idle-subscriber heartbeat** (`SUBSCRIBER_HEARTBEAT_INTERVAL_MS`,
+  default 60 s): an idle pub/sub connection gets a harmless message frame
+  on a reserved channel, so Azure Container Apps' envoy ingress doesn't drop
+  it after its 5-minute idle timeout (TCP keepalive alone doesn't reset it).
+- The Bicep module's `containerImage` default now tracks its own release
+  (`ghcr.io/davidyack/zatedb:0.1.2`). Note: the `v0.1.1` module still
+  defaulted to the `0.1.0` image, which has the `@azure/cosmos` crash below —
+  consumers of module `0.1.1` should move to `0.1.2` or pin `containerImage`.
+
+## 0.1.1
 
 - **Fix: HA startup crash `Cannot find package '@azure/cosmos'` in the
   published images** (`:edge`, `:0.1.0`). The Azure SDK's transitive core
