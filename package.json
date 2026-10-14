@@ -1,6 +1,6 @@
 {
   "name": "zatedb",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Small, self-hosted, RESP-protocol-compatible cache/pubsub service implementing only the Redis command surface the consuming app actually uses.",
   "type": "module",
   "private": true,
