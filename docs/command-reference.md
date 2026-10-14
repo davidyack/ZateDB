@@ -26,6 +26,8 @@ by integration tests against the real client libraries that use it — see
 | `HSET` | Multi field/value pairs; returns the count of *new* fields added. |
 | `HDEL` | Multi-field; deletes the key entirely once its last field is removed. |
 | `HGETALL` | Returns an empty array (not an error) for a missing key. |
+| `HMGET` | One reply entry per requested field, in request order; a missing field or missing key is nil (Lua sees `false`). `WRONGTYPE` on a non-hash key. |
+| `HINCRBYFLOAT` | Adds a signed, fractional increment to a hash field (creating the key/field at `0`) and replies the new value as a bulk string formatted like Redis: plain decimal, at most 17 significant digits, no trailing zeros. Errors: `ERR value is not a valid float` (bad increment), `ERR hash value is not a float` (existing field isn't numeric), `ERR increment would produce NaN or Infinity`. In HA it replicates additively per node — see [high-availability.md](./high-availability.md). |
 | `ZADD` | Multi score/member pairs; returns the count of *new* members added (an existing member's score is updated, not counted as new). |
 | `ZREMRANGEBYSCORE` | Full range-bound syntax — see below. |
 | `ZCOUNT` | Full range-bound syntax — see below. |

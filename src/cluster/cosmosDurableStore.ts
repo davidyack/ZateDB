@@ -1,5 +1,5 @@
 import type { DurableStore } from './durableStore.js';
-import type { EntrySnapshot, NodeSnapshot } from './types.js';
+import type { EntrySnapshot, FloatContributionTuple, NodeSnapshot } from './types.js';
 import { errorMessage, logger } from '../logger.js';
 import { recordCosmosRequestUnits } from '../telemetry/clusterMetrics.js';
 
@@ -37,10 +37,14 @@ interface CosmosPatchOperation {
   path: string;
   value?: unknown;
 }
+interface CosmosRequestOptions {
+  accessCondition?: { type: 'IfMatch' | 'IfNoneMatch'; condition: string };
+}
 interface CosmosItemLike {
   read<T = Record<string, unknown>>(): Promise<{ resource?: T } & CosmosCharged>;
   delete(): Promise<CosmosCharged>;
   patch(operations: CosmosPatchOperation[]): Promise<CosmosCharged>;
+  replace(body: Record<string, unknown>, options?: CosmosRequestOptions): Promise<CosmosCharged>;
 }
 interface CosmosQueryParameter {
   name: string;
@@ -49,6 +53,7 @@ interface CosmosQueryParameter {
 interface CosmosContainerLike {
   items: {
     upsert(body: Record<string, unknown>): Promise<CosmosCharged>;
+    create(body: Record<string, unknown>): Promise<CosmosCharged>;
     query<T>(spec: { query: string; parameters?: CosmosQueryParameter[] }, options?: { maxItemCount?: number }): CosmosQueryIterator<T>;
   };
   item(id: string, partitionKey: string): CosmosItemLike;
@@ -84,6 +89,19 @@ function isNotFound(err: unknown): boolean {
 function isBadRequest(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && (err as { code: unknown }).code === 400;
 }
+
+/** 409 (create raced another creator) or 412 (etag precondition failed) — an optimistic-concurrency conflict worth retrying. */
+function isConflict(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && ((err as { code: unknown }).code === 409 || (err as { code: unknown }).code === 412);
+}
+
+/** A brand-new durable field counter: this origin's contribution plus the shared HSET base under SEED_ORIGIN (''), if any. */
+function newFieldCounter(originId: string, contribution: FloatContributionTuple, seed: FloatContributionTuple | null): Record<string, FloatContributionTuple> {
+  return seed ? { '': seed, [originId]: contribution } : { [originId]: contribution };
+}
+
+/** Retries for the optimistic read-modify-write fallback in putHashFieldIncrement. */
+const COUNTER_SEED_ATTEMPTS = 5;
 
 /** Cosmos DB's documented limit on the number of operations in a single Patch request. */
 const PATCH_BATCH_SIZE = 10;
@@ -254,6 +272,103 @@ export class CosmosDurableStore implements DurableStore {
         ttl: cosmosTtlSeconds(existing?.expiresAtMs ?? null),
       });
       recordCosmosRequestUnits('upsert', up.requestCharge);
+    }
+  }
+
+  async putHashFieldIncrement(
+    key: string,
+    field: string,
+    originId: string,
+    contribution: FloatContributionTuple,
+    fieldValue: string,
+    seed: FloatContributionTuple | null,
+  ): Promise<void> {
+    const id = toDocId(key);
+    const f = escapeJsonPointerSegment(field);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        // Hot path: a per-origin set on an existing counter — commutative and
+        // idempotent across nodes, so concurrent debits from different nodes
+        // never clobber each other durably either.
+        const r = await this.keysContainer.item(id, key).patch([
+          { op: 'set', path: `/entry/counters/${f}/${escapeJsonPointerSegment(originId)}`, value: contribution },
+          { op: 'set', path: `/entry/fields/${f}`, value: fieldValue },
+          { op: 'set', path: '/updatedAtMs', value: Date.now() },
+        ]);
+        recordCosmosRequestUnits('patch', r.requestCharge);
+        return;
+      } catch (err) {
+        if (!isNotFound(err) && !isBadRequest(err)) throw err;
+        try {
+          if (isNotFound(err)) {
+            // No document yet: create it. A concurrent creator makes this 409,
+            // and the retry then patches the doc that creator wrote.
+            const r = await this.keysContainer.items.create({
+              id,
+              key,
+              entry: { type: 'hash', fields: { [field]: fieldValue }, counters: { [field]: newFieldCounter(originId, contribution, seed) }, expiresAtMs: null },
+              updatedAtMs: Date.now(),
+              ttl: -1,
+            });
+            recordCosmosRequestUnits('upsert', r.requestCharge);
+            return;
+          }
+          // The doc exists but the /entry/counters/<field> parent doesn't
+          // (first increment of this field). Seed it with an etag-guarded
+          // replace so a concurrent field/counter patch from another node
+          // can't be overwritten: a lost race is a 412 and we retry.
+          await this.seedHashFieldCounter(id, key, field, originId, contribution, fieldValue, seed);
+          return;
+        } catch (seedErr) {
+          if (!isConflict(seedErr) || attempt >= COUNTER_SEED_ATTEMPTS) throw seedErr;
+        }
+      }
+    }
+  }
+
+  private async seedHashFieldCounter(
+    id: string,
+    key: string,
+    field: string,
+    originId: string,
+    contribution: FloatContributionTuple,
+    fieldValue: string,
+    seed: FloatContributionTuple | null,
+  ): Promise<void> {
+    type StoredEntry = { type?: string; fields?: Record<string, string>; counters?: Record<string, Record<string, FloatContributionTuple>>; expiresAtMs?: number | null };
+    const read = await this.keysContainer.item(id, key).read<Record<string, unknown> & { entry?: StoredEntry; _etag?: string }>();
+    recordCosmosRequestUnits('query', read.requestCharge);
+    const doc = read.resource;
+    if (doc === undefined) throw Object.assign(new Error('document vanished while seeding counter'), { code: 412 });
+    const entry = doc.entry;
+    // A non-hash doc here means a divergent type (e.g. a SET raced this
+    // HINCRBYFLOAT); the local store refused the increment in that case, so
+    // there's nothing coherent to persist.
+    if (entry?.type !== 'hash') return;
+    const counters = { ...(entry.counters ?? {}) };
+    // Another origin may have created this field's counter since our patch
+    // failed; otherwise this write creates it and records the shared seed.
+    counters[field] = counters[field] ? { ...counters[field], [originId]: contribution } : newFieldCounter(originId, contribution, seed);
+    const body = { ...doc, entry: { ...entry, fields: { ...(entry.fields ?? {}), [field]: fieldValue }, counters }, updatedAtMs: Date.now() };
+    const r = await this.keysContainer
+      .item(id, key)
+      .replace(body, doc._etag ? { accessCondition: { type: 'IfMatch', condition: doc._etag } } : undefined);
+    recordCosmosRequestUnits('upsert', r.requestCharge);
+  }
+
+  async deleteHashFieldCounters(key: string, fields: string[]): Promise<void> {
+    const id = toDocId(key);
+    // One remove per field: Cosmos fails a whole patch if any removed path is
+    // absent, and a field's counter may never have been persisted (e.g. it
+    // was TTL-exempt at the time), so each is independent and a 400/404 is
+    // simply "nothing to clear".
+    for (const field of fields) {
+      try {
+        const r = await this.keysContainer.item(id, key).patch([{ op: 'remove', path: `/entry/counters/${escapeJsonPointerSegment(field)}` }]);
+        recordCosmosRequestUnits('patch', r.requestCharge);
+      } catch (err) {
+        if (!isNotFound(err) && !isBadRequest(err)) throw err;
+      }
     }
   }
 

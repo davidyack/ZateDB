@@ -11,7 +11,9 @@ Redis-compatible engine. It supports:
 
 - **Strings** — `GET`/`SET` with `EX`/`PX`/`KEEPTTL`/`NX`/`XX`/`GET` (the
   `SET … NX PX` distributed-lock primitive), `MGET`/`MSET`, `INCR`.
-- **Hashes** and **sorted sets** (range-bound `ZADD`/`ZCOUNT`/`ZREMRANGEBYSCORE`).
+- **Hashes** (`HSET`/`HDEL`/`HGETALL`/`HMGET`, and `HINCRBYFLOAT`, which
+  replicates additively across nodes) and **sorted sets** (range-bound
+  `ZADD`/`ZCOUNT`/`ZREMRANGEBYSCORE`).
 - **Keys** — `DEL`, `EXISTS`, `EXPIRE`/`PEXPIRE`, `TTL`/`PTTL`, and `SCAN`
   (for session/cache stores like `connect-redis`).
 - **Lua scripting** — `EVAL`/`EVALSHA`/`SCRIPT` on an embedded VM, with

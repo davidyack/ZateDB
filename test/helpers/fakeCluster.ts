@@ -1,6 +1,6 @@
 import type { DurableStore } from '../../src/cluster/durableStore.js';
 import type { ReplicationTransport } from '../../src/cluster/replicationTransport.js';
-import type { EntrySnapshot, NodeSnapshot, ReplicationEvent } from '../../src/cluster/types.js';
+import type { EntrySnapshot, FloatContributionTuple, NodeSnapshot, ReplicationEvent } from '../../src/cluster/types.js';
 
 /**
  * In-memory double for Cosmos DB. Shared across simulated nodes in a test
@@ -70,7 +70,37 @@ export class FakeDurableStore implements DurableStore {
     const base = existing?.type === 'hash' ? existing.fields : {};
     const merged = { ...base };
     for (const [field, value] of fields) merged[field] = value;
-    this.keys.set(key, { type: 'hash', fields: merged, expiresAtMs: existing?.type === 'hash' ? existing.expiresAtMs : null });
+    this.keys.set(key, {
+      type: 'hash',
+      fields: merged,
+      expiresAtMs: existing?.type === 'hash' ? existing.expiresAtMs : null,
+      ...(existing?.type === 'hash' && existing.counters ? { counters: existing.counters } : {}),
+    });
+    this.updatedAt.set(key, this.nextTs());
+  }
+  async putHashFieldIncrement(
+    key: string,
+    field: string,
+    originId: string,
+    contribution: FloatContributionTuple,
+    fieldValue: string,
+    seed: FloatContributionTuple | null,
+  ): Promise<void> {
+    const existing = this.keys.get(key);
+    const hash = existing?.type === 'hash' ? existing : { type: 'hash' as const, fields: {}, expiresAtMs: null };
+    const counters = { ...(hash.counters ?? {}) };
+    // Mirrors Cosmos: an existing counter gets a per-origin patch; creating
+    // the field's counter is when the seed is recorded.
+    counters[field] = counters[field] ? { ...counters[field], [originId]: contribution } : { ...(seed ? { '': seed } : {}), [originId]: contribution };
+    this.keys.set(key, { ...hash, fields: { ...hash.fields, [field]: fieldValue }, counters });
+    this.updatedAt.set(key, this.nextTs());
+  }
+  async deleteHashFieldCounters(key: string, fields: string[]): Promise<void> {
+    const existing = this.keys.get(key);
+    if (existing?.type !== 'hash' || !existing.counters) return;
+    const counters = { ...existing.counters };
+    for (const field of fields) delete counters[field];
+    this.keys.set(key, { ...existing, counters });
     this.updatedAt.set(key, this.nextTs());
   }
   async deleteHashFields(key: string, fields: string[]): Promise<void> {

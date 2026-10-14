@@ -103,6 +103,20 @@ describe('node-redis v5 client against ZateDB', () => {
     expect(await client.hGetAll('presence:temp')).toEqual({});
   });
 
+  it('HMGET returns values in field order with null for missing fields/keys', async () => {
+    await client.hSet('bucket:1', { tokens: '9', ts: '1700' });
+    expect(await client.hmGet('bucket:1', ['ts', 'nope', 'tokens'])).toEqual(['1700', null, '9']);
+    expect(await client.hmGet('no-such-bucket', ['tokens'])).toEqual([null]);
+  });
+
+  it('HINCRBYFLOAT credits and debits a hash field, top-level and inside EVAL', async () => {
+    await client.hSet('gate:1', { balance: '10' });
+    expect(await client.hIncrByFloat('gate:1', 'balance', -2.5)).toBe('7.5');
+    expect(await client.hIncrByFloat('gate:1', 'balance', 0.1)).toBe('7.6');
+    const script = "local v = redis.call('HINCRBYFLOAT', KEYS[1], 'balance', ARGV[1]); local m = redis.call('HMGET', KEYS[1], 'balance', 'missing'); return {v, m[1], tostring(m[2])}";
+    expect(await client.eval(script, { keys: ['gate:1'], arguments: ['-0.6'] })).toEqual(['7', '7', 'false']);
+  });
+
   it('ZADD/ZCOUNT/ZREMRANGEBYSCORE round-trip a sorted set with Redis range syntax', async () => {
     await client.del('zs');
     await client.zAdd('zs', [

@@ -6,6 +6,20 @@ All notable changes to ZateDB are documented here. Versions are tagged
 
 ## Unreleased
 
+- **New: `HMGET`** — one reply per requested field, nil for missing
+  fields/keys (`false` in Lua). Read-only; callable from `redis.call`.
+  Unblocks the shared token-bucket rate-limit script, which was failing with
+  `ERR Unknown Redis command called from script`.
+- **New: `HINCRBYFLOAT`** — signed, fractional hash-field increment, reply
+  formatted like Redis (no exponent, no trailing zeros, ≤17 significant
+  digits); callable from `redis.call`. In HA it replicates as a per-node
+  PN-counter (separate grow-only credit and debit totals per node, merged by
+  max), so concurrent debits on different nodes add up instead of the last
+  field write winning — in memory and in Cosmos DB. New replication event
+  kind `hashFieldIncrement` and an optional `counters` property on durable
+  hash documents; nodes must all run this version before the command is used
+  (an older node drops the unknown event kind).
+
 - **Fix: HA startup crash `Cannot find package '@azure/cosmos'` in the
   published images** (`:edge`, `:0.1.0`). The Azure SDK's transitive core
   packages (`@azure/core-util` et al.) declare `engines.node >= 22`, and npm

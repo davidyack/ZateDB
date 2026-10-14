@@ -72,6 +72,9 @@ The exact *shape* of what's replicated depends on the command:
 - `INCR` ships this node's *cumulative contribution* to the counter, not a
   whole-key value — a commutative G-counter update (see the `INCR` bullet
   in the consistency model below).
+- `HINCRBYFLOAT` ships this node's *cumulative PN contribution* to the one
+  hash field it touched — the signed, fractional analogue of `INCR` (see the
+  `HINCRBYFLOAT` bullet below).
 - `HSET` / `HDEL` / `ZADD` / `ZREMRANGEBYSCORE` ship only the specific
   fields/members they touched (see the consistency model below).
 - `EXPIRE` / `PEXPIRE` ship **only the key's new TTL**, not a whole-entry
@@ -85,7 +88,8 @@ The exact *shape* of what's replicated depends on the command:
 are collapsed before the network round trip, so a hot key costs roughly one
 Cosmos write + one Service Bus message per drain instead of one per command:
 
-- Whole-key writes (`SET`/`DEL`), `INCR` contributions, and `TTL` changes
+- Whole-key writes (`SET`/`DEL`), `INCR` contributions, `HINCRBYFLOAT`
+  contributions (per field), and `TTL` changes
   each collapse to the *latest* queued write of their class — each fully
   supersedes the previous (an absolute value, a cumulative counter total, an
   expiry).
@@ -146,10 +150,30 @@ distributed-consensus one. Concretely:
   counter drift. (Other cross-node writes to the *same* value — a `SET`, or
   two `HSET`s to the same field — still resolve last-write-wins; it's
   specifically the additive `INCR` that's now conflict-free.)
+- **`HINCRBYFLOAT` converges on the true sum across nodes too (PN-counter),
+  including negative and fractional amounts.** A plain max-merged running
+  total only works for INCR because it never decreases; a debit does. So each
+  node tracks, per hash field, two grow-only totals of its own: everything it
+  added (`p`) and the magnitude of everything it subtracted (`n`). Peers
+  merge each half by max, and the field's value is the sum over nodes of
+  `p - n` (summed in a fixed origin order, so every node formats the
+  identical string). Two balance debits landing on different nodes at the
+  same moment therefore both apply, and reordered/duplicated/delayed delivery
+  can't drift the balance. A value an `HSET` left in the field becomes the
+  shared base (the reserved seed origin), exactly like a `SET` before
+  `INCR`. In Cosmos DB each origin's `[p, n]` is a separate property under
+  `/entry/counters/<field>/<origin>`, patched independently, so durable
+  writes don't clobber each other either; hydration recomputes the field
+  from those contributions.
 - **`SET` on a counter resets it (last-write-wins).** Writing a plain value
   to a key clears its per-origin contributions cluster-wide; a `SET` racing
   concurrent `INCR`s on the same key resolves last-write-wins, as any
-  overwrite does.
+  overwrite does. `HSET` (or `HDEL`) of a `HINCRBYFLOAT` field likewise
+  resets that field's counter on every node and in Cosmos DB. The caveat is
+  the same for both: an increment made on another node *before* it applied
+  the reset, but delivered *after* it, is merged on top of the new value —
+  so seed a balance with `HSET` once and move it only with
+  `HINCRBYFLOAT`; don't re-`HSET` it while debits may be in flight.
 - **Reads are always local.** `GET` / `HGETALL` / `ZCOUNT` never call out
   to Cosmos DB — that's the whole point of the in-memory hot copy. A key
   written on another node is visible locally once its replication event
