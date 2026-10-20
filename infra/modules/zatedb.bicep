@@ -40,7 +40,7 @@ param location string = resourceGroup().location
 param managedEnvironmentId string
 
 @description('Container image, e.g. <registry>.azurecr.io/zatedb:<tag>. Pin a digest or an immutable tag; Container Apps resolves a tag to a digest once, at revision-creation time, so a revision pointing at :latest keeps serving whatever it first pulled. Defaults to the published GHCR image at the version this module ships with; override to pin a different tag/digest or to use a private registry.')
-param containerImage string = 'ghcr.io/davidyack/zatedb:0.1.2'
+param containerImage string = 'ghcr.io/davidyack/zatedb:0.1.3'
 
 @description('Name of the container registry to pull from, when it is a private Azure Container Registry. Leave empty for a public image. When set, this module grants its identity AcrPull.')
 param containerRegistryName string = ''

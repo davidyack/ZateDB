@@ -6,6 +6,8 @@ All notable changes to ZateDB are documented here. Versions are tagged
 
 ## Unreleased
 
+## 0.1.3
+
 - **Command coverage audit now checks Lua scripts.** Every string/template
   literal in the scanned source is searched for `redis.call(...)` /
   `redis.pcall(...)`; a literal command ZateDB doesn't implement (or that a
