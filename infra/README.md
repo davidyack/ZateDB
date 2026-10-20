@@ -23,7 +23,7 @@ module zatedb 'modules/zatedb.bicep' = {
 ```
 
 `containerImage` defaults to the published public image
-(`ghcr.io/davidyack/zatedb:0.1.2`), so it's omitted above; pass it to pin a
+(`ghcr.io/davidyack/zatedb:0.1.3`), so it's omitted above; pass it to pin a
 different tag/digest or to pull from a private registry instead (with
 `containerRegistryName` set, for AcrPull).
 
@@ -36,7 +36,7 @@ you can reference it directly instead of copying the four files in
 `modules/`:
 
 ```bicep
-module zatedb 'br:ghcr.io/davidyack/zatedb/main:0.1.2' = {
+module zatedb 'br:ghcr.io/davidyack/zatedb/main:0.1.3' = {
   name: 'zatedb'
   params: { /* same params as above */ }
 }
