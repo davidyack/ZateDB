@@ -93,26 +93,87 @@ node).
 ## Command coverage audit
 
 [`scripts/commandCoverageAudit.ts`](../scripts/commandCoverageAudit.ts) is
-a CI-time script a **consuming app** runs against its own source tree,
-scanning for Redis client call sites and failing if it finds a command
-ZateDB doesn't implement:
+a CI-time script a **consuming app** runs against its own source tree. It
+fails (exit 1) if it finds a Redis command ZateDB doesn't implement, or an
+option ZateDB rejects:
 
 ```bash
-npm run coverage-audit -- /path/to/consuming-app/src
+npm run coverage-audit -- /path/to/consuming-app/src [--include-tests]
 ```
 
-It's a heuristic (TypeScript-AST-based, tracks variables assigned from a
-configurable "get client" factory — default names `getRedisClient` and
-`redisClient` — and maps node-redis camelCase method names to RESP command
-names), not a full type-checker. Treat a clean run as a strong signal, not
-a formal proof: it won't catch every possible aliasing pattern (e.g. a
-client passed through several layers of indirection).
+The implemented-command list it checks against is
+[`src/commands/commandNames.ts`](../src/commands/commandNames.ts), which the
+dispatcher's `COMMANDS` table is held identical to by `tsc` (`satisfies
+Record<ImplementedCommand, CommandSpec>`) — so the audit can never disagree
+with what the server serves. It runs two scans:
 
-Wire it into the consuming app's CI so a newly-added Redis call using an
-unsupported command fails the build instead of failing silently in
-production — this is the exact mechanism that would have caught a
-scoping gap immediately, rather than discovering it as a production
-incident later.
+- **Client call sites.** TypeScript-AST-based: tracks variables assigned
+  from a configurable "get client" factory (default names `getRedisClient`,
+  `redisClient`, `getRedisPubSubClients`) and maps node-redis camelCase
+  method names to RESP command names. A `zAdd` with an options argument (or
+  `zAddIncr`) fails too — ZateDB's `ZADD` takes no flags.
+- **Commands inside Lua scripts.** Every string and template literal in the
+  source is scanned for `redis.call(...)` / `redis.pcall(...)`, so a script
+  is caught wherever it lives — a module constant, an inline `eval`
+  argument, a `defineScript`/`SCRIPT LOAD` body — regardless of how it
+  reaches `EVAL`/`EVALSHA`. This is the gap that produced several production
+  breakages (`ZCARD`, `ZREM`, `ZADD XX CH`, `INCRBYFLOAT`, `LLEN`/`LPUSH`/
+  `RPUSH`/`LPOP`, `HEXISTS` called from scripts): the client call is a
+  supported `EVAL`, and the unsupported command only fails at runtime, as a
+  script error. For each literal command name it checks:
+  - the command is implemented **and** callable from a script (connection,
+    pub/sub and scripting commands such as `EVAL`/`SUBSCRIBE` are not);
+  - literal options ZateDB rejects: any `ZADD` flag
+    (`NX`/`XX`/`GT`/`LT`/`CH`/`INCR`), and any `SET` option other than
+    `EX`/`PX`/`KEEPTTL`/`NX`/`XX`/`GET`. Options passed through `ARGV` can't
+    be seen statically and aren't checked.
+
+  A command name that isn't a literal (`redis.call(cmd, ...)`, or a
+  `${...}` substitution in a template) can't be checked; it is printed as a
+  **warning** and does not fail the run. Comments are never scanned. Each
+  finding is reported at the `file:line` of the `redis.call` itself.
+
+Test files (`__tests__/`, `__mocks__/`, `test/`, `tests/`, `*.test.*`,
+`*.spec.*`) are skipped by default — their scripts run against fakes, not
+ZateDB; pass `--include-tests` to scan them as well.
+
+It's a heuristic, not a type-checker or a Lua parser. Treat a clean run as a
+strong signal, not a formal proof: it won't catch every aliasing pattern
+(e.g. a client passed through several layers of indirection, or a script
+assembled by concatenation that splits a `redis.call(` across pieces).
+
+### Running it in a consuming app's CI
+
+ZateDB isn't published to npm (`"private": true`), so the audit runs from a
+checkout of the ZateDB ref you deploy — pin it to the same version as your
+image so the audit checks the command surface you actually run.
+
+**GitHub Actions** — use the composite action in
+[`coverage-audit/`](../coverage-audit/action.yml):
+
+```yaml
+- uses: actions/checkout@v4
+- uses: davidyack/ZateDB/coverage-audit@v0.1.3   # the ZateDB version you deploy
+  with:
+    path: backend/src
+```
+
+**Any other CI** (needs Node 18+ and git):
+
+```bash
+git clone --depth 1 --branch v0.1.3 https://github.com/davidyack/ZateDB.git .zatedb
+npm --prefix .zatedb ci --omit=optional --no-audit --no-fund
+npm --prefix .zatedb run -s coverage-audit -- "$PWD/backend/src"
+```
+
+`--omit=optional` skips the server's Azure/OTel runtime tree; the audit only
+needs `typescript` and `tsx`. (An `npx github:davidyack/ZateDB` bin isn't
+offered: a git install drops devDependencies, so it would mean shipping the
+TypeScript compiler in the server's production dependencies.)
+
+Wire it into the consuming app's CI so a newly-added Redis call — or Lua
+script — using an unsupported command fails the build instead of failing
+silently in production.
 
 ## Performance benchmark
 

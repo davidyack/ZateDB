@@ -1,0 +1,36 @@
+name: ZateDB command coverage audit
+description: >-
+  Fails the job when the consuming app's source uses a Redis command (from a
+  node-redis client call or inside a Lua script) that ZateDB does not
+  implement, or an option ZateDB rejects. Runs scripts/commandCoverageAudit.ts
+  from the ZateDB ref this action is pinned to, so pin it to the same ZateDB
+  version you deploy.
+inputs:
+  path:
+    description: Source directory to scan, relative to the workspace (e.g. backend/src).
+    required: true
+  include-tests:
+    description: Also scan test files (__tests__/, test/, *.test.*, *.spec.*). Off by default — their scripts run against fakes.
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    # Node (18+) must already be on the runner — GitHub-hosted runners have it;
+    # add actions/setup-node before this step on a self-hosted one.
+    - name: Install audit dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/..
+      # The audit needs only typescript + tsx; --omit=optional skips the
+      # server's Azure/OTel runtime tree.
+      run: npm ci --omit=optional --no-audit --no-fund --loglevel=error
+    - name: Run command coverage audit
+      shell: bash
+      working-directory: ${{ github.action_path }}/..
+      env:
+        AUDIT_PATH: ${{ inputs.path }}
+        AUDIT_INCLUDE_TESTS: ${{ inputs.include-tests }}
+      run: |
+        args=("$GITHUB_WORKSPACE/$AUDIT_PATH")
+        if [ "$AUDIT_INCLUDE_TESTS" = "true" ]; then args+=(--include-tests); fi
+        npm run -s coverage-audit -- "${args[@]}"
