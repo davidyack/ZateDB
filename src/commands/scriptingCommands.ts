@@ -4,30 +4,11 @@ import type { CommandContext, CommandResult } from './context.js';
 import { result } from './context.js';
 import { wrongArgsError } from './errors.js';
 import { COMMANDS, runCommand } from './dispatcher.js';
+import { NOT_ALLOWED_IN_SCRIPT } from './commandNames.js';
 import { runLuaScript } from '../scripting/luaEngine.js';
 import { scriptCache } from '../scripting/scriptCache.js';
 import { recordEvalsha, recordScriptError } from '../telemetry/scriptMetrics.js';
 
-/**
- * Commands a script may not invoke via redis.call. Connection/session state
- * (AUTH, subscriber mode), blocking or fan-out semantics, and nested scripting
- * have no coherent meaning inside a synchronous script, so Redis flags them
- * `noscript`; we mirror that. Everything else known to the dispatcher — the
- * data commands — is callable.
- */
-const NOT_ALLOWED_IN_SCRIPT: ReadonlySet<string> = new Set([
-  'EVAL',
-  'EVALSHA',
-  'SCRIPT',
-  'SUBSCRIBE',
-  'PSUBSCRIBE',
-  'UNSUBSCRIBE',
-  'PUNSUBSCRIBE',
-  'AUTH',
-  'HELLO',
-  'CLIENT',
-  'QUIT',
-]);
 
 /**
  * Executes one `redis.call(...)` from a running script. Returns a single RESP

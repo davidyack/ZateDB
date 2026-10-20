@@ -7,6 +7,7 @@ import * as sortedSetCommands from './sortedSetCommands.js';
 import * as pubsubCommands from './pubsubCommands.js';
 import * as scriptingCommands from './scriptingCommands.js';
 import * as serverCommands from './serverCommands.js';
+import type { ImplementedCommand } from './commandNames.js';
 
 export interface CommandSpec {
   handler: CommandHandler;
@@ -83,7 +84,11 @@ const allArgsAsKeys = (args: string[]): string[] => args;
 /** MSET args are [key value key value ...]; the mutated keys are the even positions. */
 const msetKeys = (args: string[]): string[] => args.filter((_, i) => i % 2 === 0);
 
-export const COMMANDS: Record<string, CommandSpec> = {
+/**
+ * `satisfies` keeps this table and `IMPLEMENTED_COMMANDS` (commandNames.ts —
+ * what the coverage audit reads) identical: a missing or extra key fails tsc.
+ */
+const COMMAND_SPECS = {
   PING: spec(connectionCommands.ping, { allowedPreAuth: true, allowedInSubscriberMode: true }),
   INFO: spec(serverCommands.info),
   HELLO: spec(connectionCommands.hello, { allowedPreAuth: true }),
@@ -124,7 +129,9 @@ export const COMMANDS: Record<string, CommandSpec> = {
   UNSUBSCRIBE: spec(pubsubCommands.unsubscribe, { allowedInSubscriberMode: true }),
   PUNSUBSCRIBE: spec(pubsubCommands.punsubscribe, { allowedInSubscriberMode: true }),
   PUBSUB: spec(pubsubCommands.pubsub, { allowedInSubscriberMode: true }),
-};
+} satisfies Record<ImplementedCommand, CommandSpec>;
+
+export const COMMANDS: Record<string, CommandSpec> = COMMAND_SPECS;
 
 export interface DispatchOutcome extends CommandResult {
   command: string;
@@ -333,8 +340,4 @@ export function runCommand(ctx: CommandContext, command: string, args: string[],
   }
 
   return { command, ...outcome, isError };
-}
-
-export function isKnownCommand(command: string): boolean {
-  return command.toUpperCase() in COMMANDS;
 }

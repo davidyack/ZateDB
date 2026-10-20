@@ -6,6 +6,24 @@ All notable changes to ZateDB are documented here. Versions are tagged
 
 ## Unreleased
 
+- **Command coverage audit now checks Lua scripts.** Every string/template
+  literal in the scanned source is searched for `redis.call(...)` /
+  `redis.pcall(...)`; a literal command ZateDB doesn't implement (or that a
+  script may not call) fails the audit at the `file:line` of the call, as do
+  literal options ZateDB rejects (`ZADD` flags `NX`/`XX`/`GT`/`LT`/`CH`/`INCR`,
+  `SET` options beyond `EX`/`PX`/`KEEPTTL`/`NX`/`XX`/`GET`). A non-literal
+  command name is a warning. Client-side `zAdd(..., options)` / `zAddIncr`
+  fail too, and more unimplemented node-redis methods (`zCard`, `zRem`,
+  `incrByFloat`, list/set/hash extras) are recognized. Test files are skipped
+  unless `--include-tests` is passed.
+- New `src/commands/commandNames.ts`: the implemented-command list and the
+  script-callable rule, zero-import, held identical to the dispatcher's
+  `COMMANDS` table by `tsc`. The audit reads it instead of importing the
+  server.
+- New composite GitHub Action `davidyack/ZateDB/coverage-audit@<ref>` for
+  running the audit in a consuming app's CI — see
+  [docs/testing.md](./docs/testing.md#running-it-in-a-consuming-apps-ci).
+
 ## 0.1.2
 
 - **New: `HMGET`** — one reply per requested field, nil for missing
