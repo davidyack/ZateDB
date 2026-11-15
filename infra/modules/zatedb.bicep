@@ -118,6 +118,9 @@ param cosmosAutoscaleMaxThroughput int = 0
 @description('Application Insights connection string. Empty disables the Azure Monitor exporter.')
 param appInsightsConnectionString string = ''
 
+@description('Expose the health server port (8081: /healthz, /readyz, /metrics) to other apps in the same Container Apps Environment through an internal additional port mapping, so a consuming app can scrape the Prometheus /metrics endpoint. Never public: the mapping is external: false, so it is environment-scoped exactly like the RESP port. The health server is unauthenticated, which is why this is opt-in. The mapping is load-balanced: each request reaches ONE replica, so a scrape reports that replica\'s counters, not the cluster\'s.')
+param exposeHealthPort bool = false
+
 // ----------------------------------------------------------------- tuning --
 
 @description('Optional tuning. Anything left unset keeps the application default documented in docs/deployment.md, rather than being pinned here — so defaults live in one place.')
@@ -301,6 +304,17 @@ resource zateDb 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: respPort
         exposedPort: respPort
         transport: 'tcp'
+        // Opt-in (exposeHealthPort): the health server on its own port, still
+        // environment-internal. The admin port is never mapped.
+        additionalPortMappings: exposeHealthPort
+          ? [
+              {
+                external: false
+                targetPort: healthPort
+                exposedPort: healthPort
+              }
+            ]
+          : null
       }
       secrets: containerSecrets
       registries: usePrivateRegistry

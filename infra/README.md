@@ -152,6 +152,12 @@ tuning: {
   balancer.
 - Scaling is on concurrent TCP connections, not CPU — that's the actual load
   driver for a RESP service.
+- Only the RESP port (6379) is reachable through ingress by default. Set
+  `exposeHealthPort: true` to also map the health server (8081 — `/healthz`,
+  `/readyz`, `/metrics`) as an **internal** additional port, so another app in
+  the same environment can scrape Prometheus metrics. It is never public, but
+  the health server is unauthenticated, so it stays opt-in. The mapping is
+  load-balanced: one scrape reads one replica's counters, not the cluster's.
 - Secrets go inline as `@secure()` params by default. If your org requires
   Key Vault, pass `authPasswordSecretUri` / `adminTokenSecretUri` instead and
   grant the module's identity (`zatedb.outputs.principalId`) access at your
